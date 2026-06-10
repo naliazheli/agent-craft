@@ -1,0 +1,66 @@
+# ── Build stage ──
+FROM node:24-bookworm AS build
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY prisma ./prisma
+RUN npx prisma generate
+
+COPY . .
+RUN npm run build
+
+# ── Runtime stage ──
+FROM node:24-bookworm
+
+WORKDIR /app
+
+ARG DOCKER_CLI_VERSION=27.5.1
+ARG DOCKER_CLI_DOWNLOAD_BASE=https://download.docker.com/linux/static/stable
+ARG DOCKER_CLI_DOWNLOAD_FALLBACK_BASE=https://mirrors.aliyun.com/docker-ce/linux/static/stable
+ARG DEBIAN_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/debian
+ARG DEBIAN_SECURITY_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/debian-security
+RUN if [ -n "$DEBIAN_MIRROR" ] || [ -n "$DEBIAN_SECURITY_MIRROR" ]; then \
+    debian_mirror="${DEBIAN_MIRROR:-http://deb.debian.org/debian}"; \
+    debian_security_mirror="${DEBIAN_SECURITY_MIRROR:-http://deb.debian.org/debian-security}"; \
+    find /etc/apt -type f -exec sed -i \
+      -e "s|http://deb.debian.org/debian-security|${debian_security_mirror}|g" \
+      -e "s|https://deb.debian.org/debian-security|${debian_security_mirror}|g" \
+      -e "s|http://security.debian.org/debian-security|${debian_security_mirror}|g" \
+      -e "s|https://security.debian.org/debian-security|${debian_security_mirror}|g" \
+      -e "s|http://deb.debian.org/debian|${debian_mirror}|g" \
+      -e "s|https://deb.debian.org/debian|${debian_mirror}|g" {} +; \
+  fi \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates curl tar \
+  && rm -rf /var/lib/apt/lists/* \
+  && arch="$(dpkg --print-architecture)" \
+  && case "${arch}" in \
+    amd64) docker_arch="x86_64" ;; \
+    arm64) docker_arch="aarch64" ;; \
+    armhf) docker_arch="armhf" ;; \
+    *) echo "Unsupported Docker CLI architecture: ${arch}" >&2; exit 1 ;; \
+  esac \
+  && docker_tgz="docker-${DOCKER_CLI_VERSION}.tgz" \
+  && docker_path="${docker_arch}/${docker_tgz}" \
+  && (curl --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 20 -fsSL "${DOCKER_CLI_DOWNLOAD_BASE}/${docker_path}" -o /tmp/docker.tgz \
+    || curl --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 20 -fsSL "${DOCKER_CLI_DOWNLOAD_FALLBACK_BASE}/${docker_path}" -o /tmp/docker.tgz) \
+  && tar -xzf /tmp/docker.tgz -C /tmp \
+  && mv /tmp/docker/docker /usr/local/bin/docker \
+  && rm -rf /tmp/docker /tmp/docker.tgz
+
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/prisma ./prisma
+COPY --from=build /app/scripts ./scripts
+COPY --from=build /app/agent-workspace-bundle ./agent-workspace-bundle
+COPY --from=build /app/package.json ./
+
+ENV NODE_ENV=production
+EXPOSE 3000
+
+RUN chmod +x ./scripts/start-api.sh
+
+CMD ["./scripts/start-api.sh"]

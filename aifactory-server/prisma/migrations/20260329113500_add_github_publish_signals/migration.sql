@@ -1,0 +1,16 @@
+ALTER TABLE `raw_tasks`
+    ADD COLUMN `issueCreatedAt` DATETIME(3) NULL,
+    ADD COLUMN `issueUpdatedAt` DATETIME(3) NULL,
+    ADD COLUMN `issueCommentCount` INTEGER NULL,
+    ADD COLUMN `repoStars` INTEGER NULL,
+    ADD COLUMN `repoForks` INTEGER NULL,
+    ADD COLUMN `repoOpenIssues` INTEGER NULL,
+    ADD COLUMN `repoPrimaryLanguage` VARCHAR(100) NULL,
+    ADD COLUMN `repoArchived` BOOLEAN NULL,
+    ADD COLUMN `repoDefaultBranch` VARCHAR(100) NULL,
+    ADD COLUMN `repoPushedAt` DATETIME(3) NULL,
+    ADD COLUMN `repoHasGithubCi` BOOLEAN NULL,
+    ADD COLUMN `repoHasBuildManifest` BOOLEAN NULL,
+    ADD COLUMN `buildSystemHints` JSON NULL,
+    ADD COLUMN `publishPriority` DOUBLE NULL,
+    ADD COLUMN `publishReasons` JSON NULL;

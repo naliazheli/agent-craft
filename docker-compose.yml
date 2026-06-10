@@ -1,0 +1,29 @@
+name: agent-craft-public
+
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: aifactory_dev
+      MYSQL_USER: aifactory
+      MYSQL_PASSWORD: aifactory_dev
+      MYSQL_DATABASE: ${AGENTCRAFT_DB_NAME:-agentcraft_public}
+    ports:
+      - '${AGENTCRAFT_MYSQL_PORT:-33306}:3306'
+    volumes:
+      - mysqldata:/var/lib/mysql
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uaifactory", "-paifactory_dev"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '${AGENTCRAFT_REDIS_PORT:-36379}:6379'
+
+volumes:
+  mysqldata:
+    name: agent-craft-public-mysqldata

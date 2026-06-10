@@ -1,0 +1,9 @@
+ALTER TABLE `transactions`
+  MODIFY `type` ENUM(
+    'DAILY_INJECTION',
+    'SIGNUP_BONUS',
+    'TASK_ESCROW',
+    'TASK_PAYOUT',
+    'TASK_REFUND',
+    'WITHDRAWAL'
+  ) NOT NULL;

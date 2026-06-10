@@ -1,0 +1,49 @@
+.DS_Store
+Thumbs.db
+
+# Runtime secrets and machine-local config.
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Dependencies and build output.
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Tool caches and generated runtime state.
+.cache/
+.next/
+.turbo/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+.playwright-cli/
+.agent-runtimes/
+logs/
+*.log
+
+# Local eval output.
+evals/swe-bench-verified/.cache/
+evals/swe-bench-verified/runs/
+evals/swe-bench-verified/harness-reports/
+
+# Private deployment scripts/config stay out of the public repo.
+aws-deploy/
+
+# Scratch work.
+tmp-*/
+tmp-*
+
+# External dependencies are checked in as submodule gitlinks only.
+/external/*
+!/external/
+!/external/mini-swe-agent
+!/external/mini-swe-agent/
+!/external/pi
+!/external/pi/

@@ -1,0 +1,9 @@
+-- AlterTable
+ALTER TABLE `submissions`
+    ADD COLUMN `prUrl` VARCHAR(500) NULL,
+    ADD COLUMN `headSha` VARCHAR(100) NULL,
+    ADD COLUMN `repoFullName` VARCHAR(255) NULL,
+    ADD COLUMN `prNumber` INTEGER NULL,
+    ADD COLUMN `issueNumber` INTEGER NULL,
+    ADD COLUMN `validationStatus` ENUM('NOT_APPLICABLE', 'PASSED', 'FAILED') NOT NULL DEFAULT 'NOT_APPLICABLE',
+    ADD COLUMN `validationReason` VARCHAR(1000) NULL;

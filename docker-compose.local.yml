@@ -1,0 +1,149 @@
+name: agent-craft-public
+
+# Local Docker testing (isolated public-repo full-stack)
+# Usage: docker compose -f docker-compose.local.yml up --build
+# Access: http://localhost:8088  (frontend with nginx proxy)
+
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: aifactory_dev
+      MYSQL_USER: aifactory
+      MYSQL_PASSWORD: aifactory_dev
+      MYSQL_DATABASE: ${AGENTCRAFT_DB_NAME:-agentcraft_public}
+    ports:
+      - '${AGENTCRAFT_MYSQL_PORT:-33306}:3306'
+    volumes:
+      - mysqldata:/var/lib/mysql
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --disable-log-bin
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uaifactory", "-paifactory_dev"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '${AGENTCRAFT_REDIS_PORT:-36379}:6379'
+
+  api:
+    image: agentcraft-api
+    build:
+      context: ./aifactory-server
+      dockerfile: Dockerfile.api
+    ports:
+      - '${AGENTCRAFT_API_PORT:-3100}:3000'
+    env_file:
+      - ./aifactory-server/.env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: mysql://aifactory:aifactory_dev@mysql:3306/${AGENTCRAFT_DB_NAME:-agentcraft_public}
+      REDIS_URL: redis://redis:6379
+      CORS_ORIGIN: http://localhost:${AGENTCRAFT_FRONTEND_PORT:-8088},http://localhost:${AGENTCRAFT_API_PORT:-3100},http://localhost
+      JWT_SECRET: dev-jwt-secret-change-in-production
+      EMAIL_VERIFICATION_DISABLED: "true"
+      RUN_DB_MIGRATIONS_ON_START: "true"
+      # Local restart scripts run seed-local-db.* explicitly after migrations.
+      # Keep API startup from racing that one-off seed container.
+      RUN_DB_SEED_ON_START: "false"
+      AGENT_WORKSPACE_BASE_URL: http://agent-workspace:3010
+      AGENT_WORKSPACE_HOST_KEY: dev-agent-workspace-host-key
+      AGENT_WORKSPACE_SKILLS_PATH: /agent-workspace/skills
+      AGENT_WORKSPACE_PROJECT_ROLES_PATH: /agent-workspace/project-roles
+      AGENT_WORKSPACE_PROJECT_TEMPLATES_PATH: /agent-workspace/project-templates
+      HERMES_AGENT_IMAGE: aifactory/hermes-agent:real-local
+      HERMES_AGENT_IMAGES: aifactory/hermes-agent:real-local,aifactory/hermes-agent:local
+      MINI_SWE_AGENT_IMAGE: aifactory/mini-swe-agent:local
+      PI_AGENT_IMAGE: aifactory/pi-agent:local
+      CLAUDE_CODE_AGENT_IMAGE: aifactory/claude-code-agent:local
+      CODEX_AGENT_IMAGE: aifactory/codex-agent:local
+      HERMES_AGENT_CONTAINER_PREFIX: ${AGENTCRAFT_AGENT_CONTAINER_PREFIX:-agent-craft-public-hermes}
+      HERMES_AGENT_DATA_ROOT: /tmp/agent-craft-public-agent-runtimes
+      HERMES_AGENT_DOCKER_VOLUME_STRATEGY: copy
+      HERMES_AGENT_API_HOST: host.docker.internal
+      AIFACTORY_API_BASE_URL: http://host.docker.internal:${AGENTCRAFT_API_PORT:-3100}/api
+      HERMES_AGENT_WORKSPACE_BASE_URL: http://host.docker.internal:${AGENTCRAFT_WORKSPACE_PORT:-3110}
+      HERMES_AGENT_SERIALIZE_LOCAL_MODEL_REQUESTS: ${HERMES_AGENT_SERIALIZE_LOCAL_MODEL_REQUESTS:-false}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./agent-workspace/skills:/agent-workspace/skills:ro
+      - ./agent-workspace/project-roles:/agent-workspace/project-roles:ro
+      - ./agent-workspace/project-templates:/agent-workspace/project-templates:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  mcp:
+    image: agentcraft-mcp
+    build:
+      context: ./aifactory-server
+      dockerfile: Dockerfile.mcp
+    ports:
+      - '${AGENTCRAFT_MCP_PORT:-3101}:3001'
+    env_file:
+      - ./aifactory-server/.env
+    environment:
+      NODE_ENV: production
+      REDIS_URL: redis://redis:6379
+      AIFACTORY_API_BASE_URL: http://api:3000/api
+      MCP_HOST: '0.0.0.0'
+      MCP_PORT: '3001'
+    depends_on:
+      api:
+        condition: service_started
+      redis:
+        condition: service_started
+
+  agent-workspace:
+    image: agent-workspace-service
+    build:
+      context: ./agent-workspace/server
+      dockerfile: Dockerfile
+      args:
+        DEBIAN_MIRROR: ${DEBIAN_MIRROR:-http://mirrors.tuna.tsinghua.edu.cn/debian}
+        DEBIAN_SECURITY_MIRROR: ${DEBIAN_SECURITY_MIRROR:-http://mirrors.tuna.tsinghua.edu.cn/debian-security}
+    env_file:
+      - ./aifactory-server/.env
+    ports:
+      - '${AGENTCRAFT_WORKSPACE_PORT:-3110}:3010'
+    environment:
+      # TOS_* is loaded from ./aifactory-server/.env. PROJECT_STORAGE_* can override it.
+      PORT: 3010
+      HOST: 0.0.0.0
+      DATABASE_URL: mysql://aifactory:aifactory_dev@mysql:3306/${AGENTCRAFT_DB_NAME:-agentcraft_public}
+      AGENT_WORKSPACE_HOST_KEY: dev-agent-workspace-host-key
+      AGENT_WORKSPACE_RUNTIME_REGISTRATION_KEY: dev-agent-workspace-runtime-key
+      AGENT_WORKSPACE_INTEGRATION_KEY: dev-agent-workspace-integration-key
+      AGENT_WORKSPACE_JWT_SECRET: dev-agent-workspace-jwt-secret
+      AGENT_WORKSPACE_TOKEN_TTL_SECONDS: 2592000
+      PROJECT_STORAGE_ACCESS_KEY: ${PROJECT_STORAGE_ACCESS_KEY:-}
+      PROJECT_STORAGE_SECRET_KEY: ${PROJECT_STORAGE_SECRET_KEY:-}
+      PROJECT_STORAGE_REGION: ${PROJECT_STORAGE_REGION:-}
+      PROJECT_STORAGE_ENDPOINT: ${PROJECT_STORAGE_ENDPOINT:-}
+      PROJECT_STORAGE_BUCKET: ${PROJECT_STORAGE_BUCKET:-}
+      PROJECT_STORAGE_FOLDER: ${PROJECT_STORAGE_FOLDER:-}
+      PROJECT_STORAGE_PUBLIC_URL: ${PROJECT_STORAGE_PUBLIC_URL:-}
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  frontend:
+    image: agentcraft-ui
+    build:
+      context: ./aifactory-ui
+      dockerfile: Dockerfile.docker
+    ports:
+      - '${AGENTCRAFT_FRONTEND_PORT:-8088}:80'
+    depends_on:
+      - api
+      - mcp
+      - agent-workspace
+
+volumes:
+  mysqldata:
+    name: agent-craft-public-mysqldata

@@ -1,0 +1,962 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  HUMAN
+  AI_AGENT
+  ADMIN
+}
+
+enum TaskStatus {
+  OPEN
+  REVIEWING
+  COMPLETED
+  DISPUTED
+  CANCELLED
+}
+
+enum TaskSource {
+  CUSTOM
+  GITHUB_ISSUE
+  HACKERONE
+  UPWORK
+  FREELANCER
+  ISSUEHUNT
+  BOUNTYSOURCE
+  ERDOS_PROBLEM
+}
+
+enum SubmissionStatus {
+  SUBMITTED
+  APPROVED
+  REVISION_REQUESTED
+  REJECTED
+}
+
+enum SubmissionValidationStatus {
+  NOT_APPLICABLE
+  PASSED
+  FAILED
+}
+
+enum TransactionStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+enum TransactionType {
+  DAILY_INJECTION
+  SIGNUP_BONUS
+  TASK_ESCROW
+  TASK_PAYOUT
+  TASK_REFUND
+  WITHDRAWAL
+}
+
+model User {
+  id             String   @id @default(uuid())
+  email          String   @unique @db.VarChar(191)
+  passwordHash   String
+  displayName    String?
+  role           UserRole @default(HUMAN)
+  authProvider   String?  @db.VarChar(50)
+  providerId     String?  @db.VarChar(191)
+  githubLogin    String?  @db.VarChar(100)
+  walletAddress    String?
+  walletEncrypted  String?  @db.Text
+  bio            String?  @db.Text
+  avatarUrl      String?
+  balance         Float    @default(0)
+  isEmailVerified Boolean @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  createdTasks   Task[]       @relation("TaskCreator")
+  submissions    Submission[] @relation("SubmissionWorker")
+  comments       Comment[]
+  sentTx         Transaction[] @relation("TxFrom")
+  receivedTx     Transaction[] @relation("TxTo")
+  reports        Report[]
+  apiConfigs     ApiConfig[]
+  agentSessions  AgentSession[] @relation("AgentSessions")
+  agentStats     AgentStats[]   @relation("AgentStats")
+  projectOwned             Project[]           @relation("ProjectOwner")
+  projectLed               Project[]           @relation("ProjectLeadAgent")
+  projectMemberships       ProjectMember[]
+  projectGoalsCreated      ProjectGoal[]       @relation("ProjectGoalCreator")
+  projectFeaturesCreated   ProjectFeature[]    @relation("ProjectFeatureCreator")
+  projectWorkItemsCreated  ProjectWorkItem[]   @relation("ProjectWorkItemCreator")
+  projectWorkItemsOwned    ProjectWorkItem[]   @relation("ProjectWorkItemOwner")
+  projectWorkItemComments  ProjectWorkItemComment[] @relation("ProjectWorkItemCommentAuthor")
+  projectAssignments       ProjectAssignment[] @relation("ProjectAssignmentAssignee")
+  projectAssignmentsCreated ProjectAssignment[] @relation("ProjectAssignmentAssigner")
+  projectRunsTriggered     ProjectRun[]        @relation("ProjectRunTrigger")
+  projectArtifactsCreated  ProjectArtifact[]   @relation("ProjectArtifactCreator")
+  projectReviews           ProjectReview[]     @relation("ProjectReviewer")
+  projectMemoriesCreated   ProjectMemory[]     @relation("ProjectMemoryCreator")
+  projectProposalsCreated  ProjectProposal[]   @relation("ProjectProposalCreator")
+  projectProposalsResolved ProjectProposal[]   @relation("ProjectProposalResolver")
+  projectEventsActed       ProjectEvent[]      @relation("ProjectEventActor")
+  projectAgentProfilesCreated  ProjectAgentProfile[] @relation("ProjectAgentProfileCreator")
+  personalProjectTemplates ProjectPersonalTemplate[] @relation("ProjectPersonalTemplateOwner")
+
+  @@map("users")
+}
+
+model EmailVerificationCode {
+  id         String    @id @default(uuid())
+  email      String    @db.VarChar(191)
+  codeHash   String    @db.VarChar(191)
+  purpose    String    @default("register") @db.VarChar(50)
+  attempts   Int       @default(0)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([email, purpose, createdAt])
+  @@index([expiresAt])
+  @@map("email_verification_codes")
+}
+
+model Task {
+  id                 String     @id @default(uuid())
+  title              String
+  description        String     @db.Text
+  acceptanceCriteria String?    @db.Text
+  deliverableType    String?    @db.VarChar(50)
+  codeType           String?    @db.VarChar(100)
+  reward             Float
+  currency           String     @default("AIC")
+  status             TaskStatus @default(OPEN)
+  deadline           DateTime?
+  tags               Json       @default("[]")
+  attachments        Json       @default("[]")
+  autoReview         Boolean    @default(false)
+  maxWorkers         Int        @default(1)
+  taskSource         TaskSource @default(CUSTOM)
+  sourceUrl          String?    @db.VarChar(500)
+  sourceRepo         String?    @db.VarChar(255)
+  sourceIssueNumber  Int?
+  sourceMetadata     Json?
+  creatorId          String
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  creator      User          @relation("TaskCreator", fields: [creatorId], references: [id])
+  submissions  Submission[]
+  comments     Comment[]
+  transactions Transaction[]
+  rawTask      RawTask?
+
+  @@map("tasks")
+}
+
+model Submission {
+  id               String                     @id @default(uuid())
+  content          String                     @db.Text
+  fileUrls         Json                       @default("[]")
+  status           SubmissionStatus           @default(SUBMITTED)
+  reviewNote       String?
+  prUrl            String?                    @db.VarChar(500)
+  headSha          String?                    @db.VarChar(100)
+  repoFullName     String?                    @db.VarChar(255)
+  prNumber         Int?
+  issueNumber      Int?
+  validationStatus SubmissionValidationStatus @default(NOT_APPLICABLE)
+  validationReason String?                    @db.VarChar(1000)
+  taskId           String
+  workerId         String
+  version          Int                        @default(1)
+  submittedAt      DateTime                   @default(now())
+  reviewedAt       DateTime?
+  updatedAt        DateTime                   @updatedAt
+
+  task   Task @relation(fields: [taskId], references: [id])
+  worker User @relation("SubmissionWorker", fields: [workerId], references: [id])
+  comments Comment[]
+
+  @@map("submissions")
+}
+
+model Transaction {
+  id         String            @id @default(uuid())
+  amount     Float
+  currency   String            @default("AIC")
+  type       TransactionType
+  txHash     String?  @db.VarChar(255)
+  status     TransactionStatus @default(COMPLETED)
+  fromUserId String
+  toUserId   String
+  taskId     String?
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+
+  fromUser User  @relation("TxFrom", fields: [fromUserId], references: [id])
+  toUser   User  @relation("TxTo", fields: [toUserId], references: [id])
+  task     Task? @relation(fields: [taskId], references: [id])
+
+  @@map("transactions")
+}
+
+model Comment {
+  id        String   @id @default(uuid())
+  content   String   @db.Text
+  fileUrls  Json     @default("[]")
+  taskId    String
+  userId    String
+  parentId  String?
+  submissionId String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  task    Task      @relation(fields: [taskId], references: [id])
+  user    User      @relation(fields: [userId], references: [id])
+  parent  Comment?  @relation("CommentReplies", fields: [parentId], references: [id])
+  replies Comment[] @relation("CommentReplies")
+  submission Submission? @relation(fields: [submissionId], references: [id])
+
+  @@map("comments")
+}
+
+model MathProblem {
+  id          String   @id @default(uuid())
+  title       String
+  description String   @db.Text
+  difficulty  String   @default("medium")
+  category    String
+  source      String?
+  hint        String?  @db.Text
+  answer      String?  @db.Text
+  usedCount   Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  @@map("math_problems")
+}
+
+model Report {
+  id             String   @id @default(uuid())
+  summary        String   @db.Text
+  tokensConsumed Int      @default(0)
+  tasksCompleted Int      @default(0)
+  earnings       Float    @default(0)
+  date           DateTime @default(now())
+  agentId        String
+  createdAt      DateTime @default(now())
+
+  agent User @relation(fields: [agentId], references: [id])
+
+  @@map("reports")
+}
+
+enum AgentSessionType {
+  WORKER
+  REVIEWER
+}
+
+model AgentSession {
+  id          String            @id @default(uuid())
+  userId      String
+  type        AgentSessionType  @default(WORKER)
+  taskId      String?
+  taskTitle   String?
+  reward      Float             @default(0)
+  currency    String            @default("AIC")
+  workerName  String?
+  status      String            @default("evaluating")
+  startedAt   DateTime          @default(now())
+  finishedAt  DateTime?
+
+  user User              @relation("AgentSessions", fields: [userId], references: [id], onDelete: Cascade)
+  logs AgentSessionLog[]
+
+  @@index([userId, type, startedAt])
+  @@map("agent_sessions")
+}
+
+model AgentSessionLog {
+  id        String   @id @default(uuid())
+  sessionId String
+  message   String   @db.Text
+  level     String   @default("info")
+  createdAt DateTime @default(now())
+
+  session AgentSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, createdAt])
+  @@map("agent_session_logs")
+}
+
+model AgentStats {
+  id             String @id @default(uuid())
+  userId         String
+  type           AgentSessionType @default(WORKER)
+  tokensUsed     Int    @default(0)
+  tasksCompleted Int    @default(0)
+  earnings       Float  @default(0)
+  reviewed       Int    @default(0)
+  approved       Int    @default(0)
+  rejected       Int    @default(0)
+
+  user User @relation("AgentStats", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, type])
+  @@map("agent_stats")
+}
+
+model ApiConfig {
+  id          String   @id @default(uuid())
+  name        String
+  apiType     String   @default("openai")
+  apiUrl      String
+  apiKey      String   @db.Text
+  modelName   String
+  userId      String
+  isActive    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  lastUsedAt  DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("api_configs")
+}
+
+model SystemConfig {
+  id        String   @id @default(uuid())
+  key       String   @unique @db.VarChar(191)
+  value     Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("system_configs")
+}
+
+enum RawTaskSource {
+  GITHUB_ISSUE
+  HACKERONE_PROGRAM
+  UPWORK
+  ISSUEHUNT
+}
+
+enum RawTaskStatus {
+  PENDING
+  SCORING
+  SCORED
+  PUBLISHED
+  SKIPPED
+  FAILED
+}
+
+enum TaskGeneratorRunType {
+  FETCH_GITHUB
+  FETCH_HACKERONE
+  SCORE
+  PUBLISH
+  SCORE_AND_PUBLISH
+}
+
+enum TaskGeneratorRunStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum ProjectStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  COMPLETED
+  ARCHIVED
+}
+
+enum ProjectGoalStatus {
+  OPEN
+  IN_PROGRESS
+  BLOCKED
+  DONE
+  CANCELLED
+}
+
+enum ProjectFeatureStatus {
+  PLANNED
+  READY
+  IN_PROGRESS
+  BLOCKED
+  DONE
+  CANCELLED
+}
+
+enum ProjectWorkItemConcurrencyMode {
+  SINGLE
+  RACE
+  MULTI_ROLE
+  PRIMARY_BACKUP
+}
+
+enum ProjectMemberCapabilityLevel {
+  NOVICE
+  COMPETENT
+  EXPERT
+}
+
+enum ProjectMemberCapabilitySource {
+  SELF_DECLARED
+  VERIFIED_BY_REVIEW
+  VERIFIED_BY_METRIC
+}
+
+enum ProjectProposalType {
+  GOAL_DEFINITION
+  GOAL_CHANGE
+  GOAL_CLOSE
+  GOAL_REOPEN
+  BUDGET_INCREASE
+  REASSIGN
+  SCOPE_CHANGE
+  MEMBER_INVITE
+}
+
+enum ProjectProposalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+  ESCALATED
+}
+
+enum ProjectAssignmentStatus {
+  PROPOSED
+  ACTIVE
+  PAUSED
+  COMPLETED
+  RELEASED
+  FAILED
+}
+
+enum ProjectRunStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+enum ProjectReviewStatus {
+  PENDING
+  APPROVED
+  CHANGES_REQUESTED
+  REJECTED
+}
+
+model RawTask {
+  id              String        @id @default(uuid())
+  source          RawTaskSource
+  externalId      String
+  externalUrl     String
+  repoOwner       String?
+  repoName        String?
+  title           String
+  body            String?       @db.Text
+  labels          Json          @default("[]")
+  externalCreator String?
+  hasBounty       Boolean       @default(false)
+  bountyAmount    Float?
+  bountyCurrency  String?
+  status          RawTaskStatus @default(PENDING)
+  issueCreatedAt  DateTime?
+  issueUpdatedAt  DateTime?
+  issueCommentCount Int?
+  repoStars       Int?
+  repoForks       Int?
+  repoOpenIssues  Int?
+  repoPrimaryLanguage String?   @db.VarChar(100)
+  repoArchived    Boolean?
+  repoDefaultBranch String?     @db.VarChar(100)
+  repoPushedAt    DateTime?
+  repoHasGithubCi Boolean?
+  repoHasBuildManifest Boolean?
+  buildSystemHints Json?
+  sourceMetadata Json?
+
+  difficultyScore Int?
+  valueScore      Int?
+  estimatedReward Float?
+  aiSummary       String?       @db.Text
+  aiTags          Json          @default("[]")
+  shouldPublish   Boolean?
+  publishPriority Float?
+  publishReasons  Json?
+  scoredAt        DateTime?
+
+  publishedTaskId String?       @unique
+  publishedTask   Task?         @relation(fields: [publishedTaskId], references: [id])
+
+  fetchedAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@unique([source, externalId])
+  @@index([status])
+  @@map("raw_tasks")
+}
+
+model TaskGeneratorRun {
+  id          String                 @id @default(uuid())
+  type        TaskGeneratorRunType
+  status      TaskGeneratorRunStatus @default(QUEUED)
+  triggeredBy String?                @db.VarChar(191)
+  input       Json?
+  result      Json?
+  error       String?                @db.Text
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  createdAt   DateTime               @default(now())
+  updatedAt   DateTime               @updatedAt
+
+  @@index([status, createdAt])
+  @@index([type, createdAt])
+  @@map("task_generator_runs")
+}
+
+model Project {
+  id              String        @id @default(uuid())
+  name            String
+  slug            String        @unique @db.VarChar(191)
+  summary         String?       @db.Text
+  brief           String?       @db.Text
+  status          ProjectStatus @default(DRAFT)
+  visibility      String        @default("private") @db.VarChar(50)
+  ownerId         String
+  leadAgentUserId String?
+  budgetAmount    Float         @default(0)
+  budgetCurrency  String        @default("AIC") @db.VarChar(50)
+  settings        Json?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  deletedAt       DateTime?
+  deletedById     String?
+
+  owner       User                @relation("ProjectOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  leadAgent   User?               @relation("ProjectLeadAgent", fields: [leadAgentUserId], references: [id], onDelete: SetNull)
+  members     ProjectMember[]
+  goals       ProjectGoal[]
+  features    ProjectFeature[]
+  workItems   ProjectWorkItem[]
+  assignments ProjectAssignment[]
+  runs        ProjectRun[]
+  artifacts   ProjectArtifact[]
+  reviews     ProjectReview[]
+  memories    ProjectMemory[]
+  proposals   ProjectProposal[]
+  events      ProjectEvent[]
+  workItemComments ProjectWorkItemComment[]
+  globalSecrets ProjectGlobalSecret[]
+  agentProfiles ProjectAgentProfile[]
+  personalTemplates ProjectPersonalTemplate[]
+
+  @@index([ownerId, status, createdAt])
+  @@index([leadAgentUserId])
+  @@index([deletedAt])
+  @@map("projects")
+}
+
+model ProjectGlobalSecret {
+  id             String   @id @default(uuid())
+  projectId      String
+  key            String   @db.VarChar(100)
+  encryptedValue String   @db.Text
+  metadata       Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, key])
+  @@index([projectId])
+  @@map("project_global_secrets")
+}
+
+model ProjectMember {
+  id          String   @id @default(uuid())
+  projectId   String
+  userId      String
+  role        String   @db.VarChar(50)
+  permissions Json?
+  joinedAt    DateTime @default(now())
+  removedAt   DateTime?
+
+  project      Project                     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user         User                        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  capabilities ProjectMemberCapability[]
+
+  @@index([projectId])
+  @@index([userId, joinedAt])
+  @@map("project_members")
+}
+
+model ProjectAgentProfile {
+  id             String   @id @default(uuid())
+  projectId      String
+  name           String   @db.VarChar(120)
+  description    String?  @db.Text
+  role           String   @db.VarChar(50)
+  launchMode     String   @default("aws-agentcore") @db.VarChar(50)
+  agentType      String   @default("hermes-agent") @db.VarChar(80)
+  image          String?  @db.Text
+  model          String?  @db.VarChar(191)
+  llmConfigId    String?  @db.VarChar(191)
+  deploymentDays Int      @default(1)
+  settings       Json?
+  createdById    String
+  lastLaunchedAt DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdBy User    @relation("ProjectAgentProfileCreator", fields: [createdById], references: [id], onDelete: Cascade)
+
+  @@index([projectId, role, updatedAt])
+  @@index([createdById, updatedAt])
+  @@map("project_agent_profiles")
+}
+
+model ProjectPersonalTemplate {
+  id              String   @id @default(uuid())
+  ownerId         String
+  sourceProjectId String?
+  name            String   @db.VarChar(120)
+  description     String?  @db.Text
+  templateKey     String   @db.Text
+  snapshotSummary Json?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  owner         User     @relation("ProjectPersonalTemplateOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  sourceProject Project? @relation(fields: [sourceProjectId], references: [id], onDelete: SetNull)
+
+  @@index([ownerId, updatedAt])
+  @@index([sourceProjectId])
+  @@map("project_personal_templates")
+}
+
+model ProjectMemberCapability {
+  id         String                          @id @default(uuid())
+  memberId   String
+  capability String                          @db.VarChar(100)
+  level      ProjectMemberCapabilityLevel    @default(COMPETENT)
+  source     ProjectMemberCapabilitySource   @default(SELF_DECLARED)
+  createdAt  DateTime                        @default(now())
+  updatedAt  DateTime                        @updatedAt
+
+  member ProjectMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@unique([memberId, capability])
+  @@index([capability])
+  @@map("project_member_capabilities")
+}
+
+model ProjectGoal {
+  id          String            @id @default(uuid())
+  projectId   String
+  title       String
+  description String?           @db.Text
+  priority    Int               @default(0)
+  status      ProjectGoalStatus @default(OPEN)
+  sortOrder   Int               @default(0)
+  createdById String
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  project    Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdBy  User              @relation("ProjectGoalCreator", fields: [createdById], references: [id], onDelete: Cascade)
+  features   ProjectFeature[]
+  workItems  ProjectWorkItem[]
+
+  @@index([projectId, status, sortOrder])
+  @@map("project_goals")
+}
+
+model ProjectFeature {
+  id          String               @id @default(uuid())
+  projectId   String
+  goalId      String?
+  title       String
+  description String?              @db.Text
+  status      ProjectFeatureStatus @default(PLANNED)
+  priority    Int                  @default(0)
+  sortOrder   Int                  @default(0)
+  spec        Json?
+  createdById String
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+
+  project    Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  goal       ProjectGoal?       @relation(fields: [goalId], references: [id], onDelete: SetNull)
+  createdBy  User               @relation("ProjectFeatureCreator", fields: [createdById], references: [id], onDelete: Cascade)
+  workItems  ProjectWorkItem[]
+
+  @@index([projectId, status, sortOrder])
+  @@index([goalId])
+  @@map("project_features")
+}
+
+model ProjectWorkItem {
+  id                 String                @id @default(uuid())
+  projectId          String
+  goalId             String?
+  featureId          String?
+  parentWorkItemId   String?
+  title              String
+  description        String?               @db.Text
+  workType           String                @db.VarChar(50)
+  status             String                @default("DRAFT") @db.VarChar(50)
+  priority           Int                   @default(0)
+  scopeBrief         String?               @db.Text
+  acceptanceCriteria String?               @db.Text
+  inputPacket        Json?
+  outputContract     Json?
+  dependsOn          Json?
+  concurrencyMode    ProjectWorkItemConcurrencyMode @default(SINGLE)
+  createdById        String
+  ownerId            String?
+  dueAt              DateTime?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+
+  project         Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  goal            ProjectGoal?        @relation(fields: [goalId], references: [id], onDelete: SetNull)
+  feature         ProjectFeature?     @relation(fields: [featureId], references: [id], onDelete: SetNull)
+  parentWorkItem  ProjectWorkItem?    @relation("ProjectWorkItemParent", fields: [parentWorkItemId], references: [id], onDelete: SetNull)
+  childWorkItems  ProjectWorkItem[]   @relation("ProjectWorkItemParent")
+  createdBy       User                @relation("ProjectWorkItemCreator", fields: [createdById], references: [id], onDelete: Cascade)
+  owner           User?               @relation("ProjectWorkItemOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  assignments     ProjectAssignment[]
+  runs            ProjectRun[]
+  artifacts       ProjectArtifact[]
+  reviews         ProjectReview[]
+  comments        ProjectWorkItemComment[]
+
+  @@index([projectId, status, priority, createdAt])
+  @@index([goalId])
+  @@index([featureId])
+  @@index([ownerId])
+  @@map("project_work_items")
+}
+
+model ProjectWorkItemComment {
+  id         String   @id @default(uuid())
+  projectId  String
+  workItemId String
+  userId     String
+  content    String   @db.Text
+  attachments Json    @default("[]")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  project  Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workItem ProjectWorkItem @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  user     User            @relation("ProjectWorkItemCommentAuthor", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, workItemId, createdAt])
+  @@index([userId, createdAt])
+  @@map("project_work_item_comments")
+}
+
+model ProjectAssignment {
+  id               String                  @id @default(uuid())
+  projectId        String
+  workItemId       String
+  assigneeUserId   String
+  assignedByUserId String
+  role             String                  @db.VarChar(50)
+  status           ProjectAssignmentStatus @default(PROPOSED)
+  objective        String?                 @db.Text
+  contextPacket    Json?
+  startedAt        DateTime?
+  finishedAt       DateTime?
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
+
+  project      Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workItem     ProjectWorkItem   @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  assigneeUser User              @relation("ProjectAssignmentAssignee", fields: [assigneeUserId], references: [id], onDelete: Cascade)
+  assignedByUser User            @relation("ProjectAssignmentAssigner", fields: [assignedByUserId], references: [id], onDelete: Cascade)
+  runs         ProjectRun[]
+  artifacts    ProjectArtifact[]
+  reviews      ProjectReview[]
+
+  @@index([projectId, status, createdAt])
+  @@index([workItemId, status])
+  @@index([assigneeUserId, status])
+  @@map("project_assignments")
+}
+
+model ProjectRun {
+  id                String           @id @default(uuid())
+  projectId         String
+  workItemId        String
+  assignmentId      String?
+  triggeredByUserId String?
+  runType           String           @db.VarChar(50)
+  status            ProjectRunStatus @default(QUEUED)
+  instruction       String?          @db.Text
+  contextSnapshot   Json?
+  resultSummary     String?          @db.Text
+  costInfo          Json?
+  startedAt         DateTime?
+  finishedAt        DateTime?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  project         Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workItem        ProjectWorkItem    @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  assignment      ProjectAssignment? @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
+  triggeredByUser User?              @relation("ProjectRunTrigger", fields: [triggeredByUserId], references: [id], onDelete: SetNull)
+  logs            ProjectRunLog[]
+  artifacts       ProjectArtifact[]
+
+  @@index([projectId, status, createdAt])
+  @@index([workItemId, createdAt])
+  @@index([assignmentId])
+  @@map("project_runs")
+}
+
+model ProjectRunLog {
+  id        String   @id @default(uuid())
+  runId      String
+  level     String   @default("info") @db.VarChar(50)
+  message   String   @db.Text
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  run ProjectRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId, createdAt])
+  @@map("project_run_logs")
+}
+
+model ProjectArtifact {
+  id              String   @id @default(uuid())
+  projectId       String
+  workItemId      String?
+  assignmentId    String?
+  runId           String?
+  artifactType    String   @db.VarChar(50)
+  title           String?
+  content         String?  @db.Text
+  url             String?  @db.VarChar(1000)
+  metadata        Json?
+  createdByUserId String
+  createdAt       DateTime @default(now())
+
+  project       Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workItem      ProjectWorkItem?   @relation(fields: [workItemId], references: [id], onDelete: SetNull)
+  assignment    ProjectAssignment? @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
+  run           ProjectRun?        @relation(fields: [runId], references: [id], onDelete: SetNull)
+  createdByUser User               @relation("ProjectArtifactCreator", fields: [createdByUserId], references: [id], onDelete: Cascade)
+  reviews       ProjectReview[]
+
+  @@index([projectId, createdAt])
+  @@index([workItemId, createdAt])
+  @@index([assignmentId])
+  @@index([runId])
+  @@map("project_artifacts")
+}
+
+model ProjectReview {
+  id              String              @id @default(uuid())
+  projectId       String
+  workItemId      String
+  assignmentId    String?
+  artifactId      String?
+  reviewerUserId  String?
+  reviewerType    String              @db.VarChar(50)
+  status          ProjectReviewStatus @default(PENDING)
+  reviewNote      String?             @db.Text
+  checklistResult Json?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  project      Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workItem     ProjectWorkItem    @relation(fields: [workItemId], references: [id], onDelete: Cascade)
+  assignment   ProjectAssignment? @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
+  artifact     ProjectArtifact?   @relation(fields: [artifactId], references: [id], onDelete: SetNull)
+  reviewerUser User?              @relation("ProjectReviewer", fields: [reviewerUserId], references: [id], onDelete: SetNull)
+
+  @@index([projectId, status, createdAt])
+  @@index([workItemId, createdAt])
+  @@index([artifactId])
+  @@map("project_reviews")
+}
+
+model ProjectMemory {
+  id               String   @id @default(uuid())
+  projectId        String
+  memoryType       String   @db.VarChar(50)
+  title            String?
+  content          String   @db.Text
+  summary          String?  @db.Text
+  metadata         Json?
+  sourceArtifactId String?
+  createdByUserId  String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  project       Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdByUser User    @relation("ProjectMemoryCreator", fields: [createdByUserId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, memoryType, createdAt])
+  @@map("project_memories")
+}
+
+model ProjectProposal {
+  id               String                 @id @default(uuid())
+  projectId        String
+  type             ProjectProposalType
+  payload          Json
+  reason           String?                @db.Text
+  createdByUserId  String
+  approverUserIds  Json                   // array of user ids; SPEC §6.2
+  status           ProjectProposalStatus  @default(PENDING)
+  resolvedByUserId String?
+  resolvedNote     String?                @db.Text
+  expiresAt        DateTime?
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+
+  project        Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdByUser  User    @relation("ProjectProposalCreator", fields: [createdByUserId], references: [id], onDelete: Cascade)
+  resolvedByUser User?   @relation("ProjectProposalResolver", fields: [resolvedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([projectId, status, createdAt])
+  @@index([projectId, type, status])
+  @@map("project_proposals")
+}
+
+model ProjectEvent {
+  id          String   @id @default(uuid())
+  projectId   String
+  seq         Int      // monotonic per projectId; assigned in a transaction
+  type        String   @db.VarChar(80)
+  refType     String?  @db.VarChar(50)
+  refId       String?
+  payload     Json?
+  actorUserId String?
+  createdAt   DateTime @default(now())
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  actorUser User?   @relation("ProjectEventActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@unique([projectId, seq])
+  @@index([projectId, type, createdAt])
+  @@index([projectId, refType, refId])
+  @@map("project_events")
+}

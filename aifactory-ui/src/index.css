@@ -1,0 +1,287 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Light palette is the default; .dark below is toggled by the header theme button. */
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --primary: 190 95% 45%;
+    --primary-foreground: 222 47% 5%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 190 95% 55%;
+    --radius: 0.75rem;
+  }
+
+  /* AgentCraft dark — aligned with landing page (#05070f base) */
+  .dark {
+    --background: 228 50% 4%;        /* ≈ #05070f */
+    --foreground: 210 40% 98%;
+    --card: 225 38% 8%;              /* elevated surface */
+    --card-foreground: 210 40% 98%;
+    --popover: 225 38% 8%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 190 95% 55%;          /* cyan accent */
+    --primary-foreground: 222 47% 6%;
+    --secondary: 225 28% 14%;
+    --secondary-foreground: 210 40% 96%;
+    --muted: 225 25% 11%;
+    --muted-foreground: 215 18% 68%;
+    --accent: 225 30% 16%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 72% 48%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 225 25% 16%;
+    --input: 225 25% 16%;
+    --ring: 190 95% 55%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* ── Mario-style 3D coin ── */
+.coin-scene {
+  perspective: 800px;
+  width: 120px;
+  height: 120px;
+}
+
+.coin-3d {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  transform-style: preserve-3d;
+  animation: coin-spin 2.5s linear infinite;
+  filter: drop-shadow(0 0 24px rgba(245, 158, 11, 0.6));
+}
+
+.coin-face {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  overflow: hidden;
+  backface-visibility: hidden;
+}
+
+.coin-front {
+  transform: translateZ(10px);
+}
+
+.coin-back {
+  transform: rotateY(180deg) translateZ(10px);
+}
+
+.coin-edge-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 6px solid;
+  border-color: #d97706 #b45309 #92400e #d97706;
+  background: transparent;
+  backface-visibility: visible;
+}
+
+@keyframes coin-spin {
+  0%   { transform: rotateY(0deg); }
+  100% { transform: rotateY(360deg); }
+}
+
+/* Docs-style light landing overrides. Keep this scoped so theme switching stays predictable. */
+:root:not(.dark) .landing-docs-surface {
+  color: #0f172a;
+}
+
+:root:not(.dark) .landing-docs-surface [style*="radial-gradient"] {
+  background: none !important;
+}
+
+:root:not(.dark) .landing-docs-surface [class*="border-white"] {
+  border-color: #e2e8f0 !important;
+}
+
+:root:not(.dark) .landing-docs-surface [class*="bg-white/"],
+:root:not(.dark) .landing-docs-surface [class*="bg-white["],
+:root:not(.dark) .landing-docs-surface [class*="bg-black/"],
+:root:not(.dark) .landing-docs-surface [class*="bg-[#07101d]"],
+:root:not(.dark) .landing-docs-surface [class*="bg-[#0b101c]"],
+:root:not(.dark) .landing-docs-surface [class*="bg-[#070b14]"],
+:root:not(.dark) .landing-docs-surface [class*="bg-[#08111f]"],
+:root:not(.dark) .landing-docs-surface [class*="bg-gradient-to-b"],
+:root:not(.dark) .landing-docs-surface [class*="bg-[linear-gradient"] {
+  background-color: #ffffff !important;
+  background-image: none !important;
+}
+
+:root:not(.dark) .landing-docs-surface [class*="text-white"] {
+  color: #475569 !important;
+}
+
+:root:not(.dark) .landing-docs-surface h1[class*="text-white"],
+:root:not(.dark) .landing-docs-surface h2[class*="text-white"],
+:root:not(.dark) .landing-docs-surface h3[class*="text-white"],
+:root:not(.dark) .landing-docs-surface [class*="font-semibold"][class*="text-white"] {
+  color: #0f172a !important;
+}
+
+:root:not(.dark) .landing-docs-surface [class*="text-cyan-100"],
+:root:not(.dark) .landing-docs-surface [class*="text-cyan-200"],
+:root:not(.dark) .landing-docs-surface [class*="text-cyan-300"] {
+  color: #0e7490 !important;
+}
+
+:root:not(.dark) .landing-docs-surface [class*="text-emerald-100"],
+:root:not(.dark) .landing-docs-surface [class*="text-emerald-200"],
+:root:not(.dark) .landing-docs-surface [class*="text-emerald-300"] {
+  color: #047857 !important;
+}
+
+:root:not(.dark) .landing-docs-surface [class*="text-amber-50"],
+:root:not(.dark) .landing-docs-surface [class*="text-amber-100"],
+:root:not(.dark) .landing-docs-surface [class*="text-amber-200"] {
+  color: #92400e !important;
+}
+
+:root:not(.dark) .landing-docs-surface [class*="rounded-xl"],
+:root:not(.dark) .landing-docs-surface [class*="rounded-2xl"],
+:root:not(.dark) .landing-docs-surface [class*="rounded-3xl"],
+:root:not(.dark) .landing-docs-surface [class*="rounded-[28px]"],
+:root:not(.dark) .landing-docs-surface [class*="rounded-[2rem]"] {
+  border-radius: 0.5rem !important;
+}
+
+:root:not(.dark) .landing-docs-surface [class*="shadow-2xl"],
+:root:not(.dark) .landing-docs-surface [class*="shadow-xl"] {
+  box-shadow: 0 1px 2px 0 rgb(15 23 42 / 0.06) !important;
+}
+
+.dark .landing-docs-surface,
+.dark .project-docs-surface {
+  background-color: hsl(var(--background)) !important;
+  color: hsl(var(--foreground));
+}
+
+.dark .landing-docs-surface [class*="bg-[#f8fafc]"],
+.dark .landing-docs-surface [class*="bg-slate-50"],
+.dark .landing-docs-surface [class*="bg-white"],
+.dark .project-docs-surface[class*="bg-[#f8fafc]"],
+.dark .project-docs-surface [class*="bg-[#f8fafc]"],
+.dark .project-docs-surface [class*="bg-slate-50"],
+.dark .project-docs-surface [class*="bg-white"] {
+  background-color: hsl(var(--card)) !important;
+}
+
+.dark .landing-docs-surface [class*="border-slate"],
+.dark .landing-docs-surface [class*="border-cyan-200"],
+.dark .project-docs-surface [class*="border-slate"],
+.dark .project-docs-surface [class*="border-cyan-200"] {
+  border-color: hsl(var(--border)) !important;
+}
+
+.dark .landing-docs-surface [class*="text-slate-950"],
+.dark .project-docs-surface [class*="text-slate-950"] {
+  color: hsl(var(--foreground)) !important;
+}
+
+.dark .landing-docs-surface [class*="text-slate-700"],
+.dark .landing-docs-surface [class*="text-slate-600"],
+.dark .landing-docs-surface [class*="text-slate-500"],
+.dark .project-docs-surface [class*="text-slate-700"],
+.dark .project-docs-surface [class*="text-slate-600"],
+.dark .project-docs-surface [class*="text-slate-500"] {
+  color: hsl(var(--muted-foreground)) !important;
+}
+
+/* Project pages use the same light documentation surface while the rest of the app can still switch to dark. */
+:root:not(.dark) .project-docs-surface {
+  --background: 210 40% 98%;
+  --foreground: 222.2 84% 4.9%;
+  --card: 0 0% 100%;
+  --card-foreground: 222.2 84% 4.9%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 222.2 84% 4.9%;
+  --primary: 188 86% 50%;
+  --primary-foreground: 222 47% 5%;
+  --secondary: 210 40% 96.1%;
+  --secondary-foreground: 222.2 47.4% 11.2%;
+  --muted: 210 40% 96.1%;
+  --muted-foreground: 215.4 16.3% 46.9%;
+  --accent: 210 40% 96.1%;
+  --accent-foreground: 222.2 47.4% 11.2%;
+  --destructive: 0 84.2% 60.2%;
+  --destructive-foreground: 210 40% 98%;
+  --border: 214.3 31.8% 91.4%;
+  --input: 214.3 31.8% 91.4%;
+  --ring: 188 86% 50%;
+  color: #0f172a;
+}
+
+.dark .project-docs-surface {
+  --background: 228 50% 4%;
+  --foreground: 210 40% 98%;
+  --card: 225 38% 8%;
+  --card-foreground: 210 40% 98%;
+  --popover: 225 38% 8%;
+  --popover-foreground: 210 40% 98%;
+  --primary: 190 95% 55%;
+  --primary-foreground: 222 47% 6%;
+  --secondary: 225 28% 14%;
+  --secondary-foreground: 210 40% 96%;
+  --muted: 225 25% 11%;
+  --muted-foreground: 215 18% 68%;
+  --accent: 225 30% 16%;
+  --accent-foreground: 210 40% 98%;
+  --destructive: 0 72% 48%;
+  --destructive-foreground: 210 40% 98%;
+  --border: 225 25% 16%;
+  --input: 225 25% 16%;
+  --ring: 190 95% 55%;
+}
+
+:root:not(.dark) .project-docs-surface [class*="text-white"] {
+  color: #475569 !important;
+}
+
+:root:not(.dark) .project-docs-surface h1[class*="text-white"],
+:root:not(.dark) .project-docs-surface h2[class*="text-white"],
+:root:not(.dark) .project-docs-surface h3[class*="text-white"],
+:root:not(.dark) .project-docs-surface [class*="font-semibold"][class*="text-white"] {
+  color: #0f172a !important;
+}
+
+:root:not(.dark) .project-docs-surface [class*="border-white"] {
+  border-color: #e2e8f0 !important;
+}
+
+:root:not(.dark) .project-docs-surface [class*="bg-[#07101d]"],
+:root:not(.dark) .project-docs-surface [class*="bg-[#0b101c]"],
+:root:not(.dark) .project-docs-surface [class*="bg-[#070b14]"],
+:root:not(.dark) .project-docs-surface [class*="bg-[#08111f]"],
+:root:not(.dark) .project-docs-surface [class*="bg-black/"],
+:root:not(.dark) .project-docs-surface [class*="bg-white/"],
+:root:not(.dark) .project-docs-surface [class*="bg-white["] {
+  background-color: #ffffff !important;
+}
+
+:root:not(.dark) .project-docs-surface [class*="shadow-2xl"],
+:root:not(.dark) .project-docs-surface [class*="shadow-xl"] {
+  box-shadow: 0 1px 2px 0 rgb(15 23 42 / 0.06) !important;
+}
