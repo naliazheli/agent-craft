@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ArrowRight,
@@ -9,7 +9,6 @@ import {
   Coins,
   Copy,
   Crown,
-  Database,
   ExternalLink,
   FileText,
   FolderKanban,
@@ -143,12 +142,12 @@ const articleSections: ArticleSection[] = [
     depth: 2,
   },
   {
-    id: 'report-goal-fanout',
+    id: 'goal-completion-topologies',
     label: 'AgentCraft Project',
     chapter: 'project',
     title: '需要汇总的 Goal 与完成拓扑',
     description: 'Lead 先判断 goal 是直接、串行、总分、总分总还是 fan-out/fan-in；只有确实需要汇总交付物时，才在上游 item accepted 后创建 aggregation/synthesis item。',
-    keywords: ['goal topology', 'fan-out', 'fan-in', 'goal', 'work item', 'coordinator', 'memory', 'resource', 'aggregation', 'synthesis'],
+    keywords: ['goal topology', 'fan-out', 'fan-in', 'TOTAL_TO_PARTS', 'TOTAL_PARTS_TOTAL', 'goal', 'work item', 'coordinator', 'memory', 'resource', 'aggregation', 'synthesis'],
     depth: 2,
   },
   {
@@ -591,7 +590,7 @@ const planWorkReadWriteRows: Array<[string, string]> = [
   ['Owner 怎么改', 'Owner 可以调整目标、验收标准、优先级和状态。已接受或已有证据的工作不要直接改成另一个意思；更好的做法是新增 follow-up 或取消 superseded item。'],
 ];
 
-const reportGoalFanoutRows: Array<[string, string]> = [
+const goalTopologyRows: Array<[string, string]> = [
   ['Goal', 'Owner-level outcome。Goal 要写明验收标准、范围、资源边界，以及是否需要最终汇总交付物。'],
   ['Lead / Leader', '负责审 goal 和 linked items 是否足够，并判断拓扑：DIRECT、SERIAL、FAN_OUT_FAN_IN、TOTAL_TO_PARTS、TOTAL_PARTS_TOTAL 或 ITERATIVE_REVIEW。'],
   ['Planner', '当拆解不明显时提出拓扑、lane/phase、dependencies、outputContract 和是否需要 aggregation。'],
@@ -606,7 +605,7 @@ const reportGoalFanoutRows: Array<[string, string]> = [
   ['Aggregation', '只有 goal 需要汇总交付物且 sufficiency gate 通过后才创建 aggregation/synthesis/delivery item。聚合角色必须读取 accepted upstream files/items。'],
 ];
 
-const reportGoalLeadPollingRows: Array<[string, string]> = [
+const goalTopologyLeadPollingRows: Array<[string, string]> = [
   ['触发源', '定时 sweep 到期、手动 Run polling now、project activated、runtime-created/updated goal、assignment completed、resource request 或 owner todo completed。'],
   ['空闲策略', 'IDLE_ONLY 下，Lead runtime 不可达或仍在 TYPING 时不会被打断；host 写入 pollingState.nextRunAt，稍后重试。'],
   ['读取范围', '每轮先 resume，再读 coordination/lead.md、lead-goal-ledger、globals、active goals、linked item summaries、assignment/runtime-state 和 recent events；只有会影响判断时才读详情、文件和 memory。'],
@@ -614,7 +613,7 @@ const reportGoalLeadPollingRows: Array<[string, string]> = [
   ['输出动作', 'Lead 只创建或修正最小 READY/NEEDS_REVISION item、owner resource item、aggregation item，或在完成条件满足时更新 goal DONE；结束前更新 lead.md 的 cursor 和下轮队列。'],
 ];
 
-const reportGoalCompletionRows: Array<[string, string]> = [
+const goalTopologyCompletionRows: Array<[string, string]> = [
   ['上游完整', '所有必要 lane/phase/step 已 ACCEPTED，或被明确 waived 并写明原因。'],
   ['资源解决', 'requiredGlobals、owner approvals、输入文件和外部访问都已配置或明确不需要。'],
   ['汇总判断', '如果 goal 不需要 aggregation，accepted items 自身就要满足验收标准；如果需要 aggregation，最终 artifact 要能通过 project-file-read 或 artifact 链接反查。'],
@@ -622,38 +621,138 @@ const reportGoalCompletionRows: Array<[string, string]> = [
   ['目标关闭', 'Lead 只在上述条件满足后把 goal 标为 DONE，并在 completion summary 里链接关键上游输出和最终 artifact。'],
 ];
 
-const reportGoalWorkflowSteps = [
-  {
-    title: '1. Goal',
-    label: 'Owner outcome',
-    body: '定义验收标准、范围、人类资源边界，以及是否需要汇总交付物。',
-  },
-  {
-    title: '2. Plan',
-    label: 'Lead / Planner',
-    body: '判断 DIRECT、SERIAL、fan-out/fan-in、总分或总分总，写清 slice 和 output contract。',
-  },
-  {
-    title: '3. Dispatch',
-    label: 'Coordinator',
-    body: '按 workType、role、容量和资源门控派发 READY items。',
-  },
-  {
-    title: '4. Upstream',
-    label: 'Workers + Review',
-    body: '执行各自 lane、phase、step 或 revision，写共享文件并进入 review。',
-  },
-  {
-    title: '5. Fan-in',
-    label: 'Lead polling gate',
-    body: '定时或事件唤醒后读取 frontier 和 ledger，不足就补 item 或 owner resource。',
-  },
-  {
-    title: '6. Aggregate',
-    label: 'If needed',
-    body: '只有 goal 需要汇总时才读取 accepted upstream outputs，生成最终 artifact。',
-  },
+const goalTopologyModes = [
+  'DIRECT',
+  'SERIAL',
+  'FAN_OUT_FAN_IN',
+  'TOTAL_TO_PARTS',
+  'TOTAL_PARTS_TOTAL',
+  'ITERATIVE_REVIEW',
 ];
+
+const goalTopologyFlowMermaid = String.raw`flowchart TD
+  pollTimer["Lead polling config\nIDLE_ONLY or fixed interval"]
+  projectEvent["Project events\nitem accepted, resource completed, review resolved, assignment failed"]
+  wake["wakeLeadPolling\ncoalesced and skipped if lead is busy"]
+  pollRun["Lead polling conversation\nfresh frontier review"]
+  leadWorkspace["Lead workspace\ncoordination/lead.md cursor and next queue"]
+  ledger["Lead ledger\nstatusDigest, topology, last decision"]
+  owner["Owner defines or updates Goal"]
+  goal["Goal\nOutcome, acceptance bar, optional final artifact"]
+  summaryRead["Bounded summary reads\ngoals, linked item summaries, assignments, events"]
+  attentionGate{"Digest unchanged and no lead attention item?"}
+  detailRead["Targeted detail reads\nonly attention items, candidate DONE, deps, reviews, files"]
+  topologyGate{"Which completion topology fits?"}
+  resourceGate{"Required resources and owner decisions present?"}
+  resourceItem["Owner-owned resource/action item\ninputPacket.resourceRequest or ownerAction"]
+  directReady{"Accepted output already satisfies goal?"}
+  serialNext["Create next serial work item\nsmallest executable step"]
+  plannerNeed{"Need decomposition plan?"}
+  plannerItem["Planning work item\ntopology, lanes, deps, output contracts"]
+  planner["Planner proposes item topology\nparts, deps, aggregation contract"]
+  leadPlan["Lead validates item set sufficiency\nbefore expanding work"]
+  createParts["Create READY part/collection items\nbounded slices or phases"]
+  coordinator["Coordinator dispatches READY items\nrole rules, capacity, runtime fit"]
+  workers["Workers execute bounded items\none slice, phase, or revision"]
+  files["Shared project files\ninputs, evidence, outputs, deliverables"]
+  handoff["Worker handoff\nfiles, verification, blockers, memoryCandidates"]
+  review["Reviewer checks artifact vs contract"]
+  accepted{"Item accepted?"}
+  revise["NEEDS_REVISION item or bounded follow-up"]
+  fanIn{"Fan-in gate\naccepted parts enough?"}
+  aggregationNeeded{"Goal needs aggregation deliverable?"}
+  aggregationItem["Aggregation/synthesis/delivery item\nDepends on accepted upstream outputs"]
+  aggregator["Aggregator role\nreads accepted upstream files/items"]
+  aggregateOutput["Combined artifact or decision\nsummary, package, release, recommendation"]
+  aggregateReview["Aggregation review\ncoverage, support, caveats, acceptance bar"]
+  aggregateAccepted{"Aggregation accepted?"}
+  done["Lead marks Goal DONE\ncompletion summary links support artifacts"]
+  missing["Lead creates missing item\nwork, review, resource, clarification"]
+  memory["Shared Memory\nreviewed durable facts, decisions, constraints, risks"]
+
+  pollTimer --> wake
+  projectEvent --> wake
+  wake --> pollRun
+  owner --> goal
+  pollRun --> leadWorkspace --> summaryRead --> ledger --> attentionGate
+  goal --> summaryRead
+  attentionGate -- yes --> pollTimer
+  attentionGate -- no --> detailRead --> topologyGate
+  topologyGate --> resourceGate
+  resourceGate -- no --> resourceItem --> pollTimer
+  resourceGate -- yes --> directReady
+  directReady -- yes --> done
+  directReady -- no --> plannerNeed
+  plannerNeed -- yes --> plannerItem --> coordinator --> planner --> leadPlan
+  plannerNeed -- no --> leadPlan
+  leadPlan -- "DIRECT gap" --> serialNext --> coordinator
+  leadPlan -- "SERIAL next step" --> serialNext
+  leadPlan -- "PARTS needed" --> createParts --> coordinator
+  coordinator --> workers --> files --> handoff --> review --> accepted
+  handoff -. reusable candidates .-> memory
+  review -. approved candidates .-> memory
+  accepted -- no --> revise --> coordinator
+  accepted -- yes --> projectEvent
+  accepted -- yes --> fanIn
+  fanIn -- "missing part/review/resource" --> missing --> pollTimer
+  fanIn -- enough --> aggregationNeeded
+  aggregationNeeded -- no --> done
+  aggregationNeeded -- yes --> aggregationItem --> coordinator --> aggregator --> aggregateOutput --> aggregateReview --> aggregateAccepted
+  aggregateAccepted -- no --> revise
+  aggregateAccepted -- yes --> done`;
+
+const goalObjectRelationshipMermaid = String.raw`flowchart LR
+  project["Project"]
+  goal["Goal\nowner outcome"]
+  topology["Goal completion topology\nDIRECT, SERIAL, FAN_OUT_FAN_IN, TOTAL_PARTS_TOTAL"]
+  feature["Feature group\noptional lanes, parts, or phases"]
+  workItem["WorkItem\nexecutable unit"]
+  dependency["Dependency\nserial edge or aggregation input"]
+  assignment["Assignment\nruntime-bound execution"]
+  role["Role\nlead, planner, worker, reviewer, aggregator"]
+  coordinator["Coordinator\nrule and capacity based dispatcher"]
+  pollingConfig["Lead polling config\nstrategy, interval, message"]
+  pollingState["Lead polling state\nlastRunAt, nextRunAt, lastConversationId"]
+  event["Project event\nwake reason"]
+  leadWorkspace["Lead workspace file\ncoordination/lead.md"]
+  ledger["Lead ledger file\ncoordination/lead-goal-ledger.jsonl"]
+  resource["Resource\nproject global or owner item"]
+  file["Project shared file\ninputs, evidence, outputs, deliverables"]
+  memory["Memory\nreviewed durable knowledge"]
+  artifact["Artifact or handoff"]
+  review["Review"]
+
+  project --> goal
+  goal --> topology
+  goal --> feature
+  goal --> workItem
+  feature --> workItem
+  workItem --> dependency
+  dependency --> workItem
+  workItem --> assignment
+  assignment --> role
+  coordinator --> assignment
+  coordinator --> role
+  pollingConfig --> role
+  pollingState --> role
+  event --> pollingState
+  event --> coordinator
+  leadWorkspace --> goal
+  leadWorkspace --> topology
+  leadWorkspace --> ledger
+  ledger --> goal
+  ledger --> topology
+  ledger --> workItem
+  resource --> workItem
+  resource --> assignment
+  workItem --> file
+  assignment --> artifact
+  artifact --> review
+  review --> workItem
+  review --> memory
+  file --> artifact
+  memory --> workItem
+  memory --> assignment`;
 
 const deliveryReviewRows: Array<[string, string]> = [
   ['Artifacts', 'Worker、Lead 或 human 提交的交付记录，可以包含 handoff notes、报告、patch link、外部 URL、附件，以及关联 project shared file resources。'],
@@ -921,16 +1020,87 @@ const eventGraphPreviewToneClasses: Record<string, string> = {
   message: 'border-sky-200 bg-sky-50 text-sky-950',
 };
 
-function ReportGoalWorkflowPreview() {
-  const evidenceLanes = ['Lane', 'Phase', 'Step', 'Revision'];
-  const supportNodes = [
-    ['Lead polling', 'scheduled or event-triggered frontier review; skipped when lead is already working'],
-    ['Lead workspace', 'coordination/lead.md stores the readable cursor, goal queue, and next-run plan'],
-    ['Lead ledger', 'coordination/lead-goal-ledger.jsonl stores per-goal status digests and last decisions'],
-    ['Resource gate', 'owner resource/action items block missing credentials, inputs, approvals, or data access'],
-    ['Shared files', 'workers write outputs and artifacts to durable project-file paths'],
-    ['Memory', 'reviewed durable facts and risks only; not routine progress'],
-  ];
+let docsMermaidRenderQueue = Promise.resolve();
+
+function MermaidDiagram({
+  title,
+  description,
+  chart,
+  scale = 1,
+  viewportHeight = 640,
+}: {
+  title: string;
+  description: string;
+  chart: string;
+  scale?: number;
+  viewportHeight?: number;
+}) {
+  const rawId = useId();
+  const [svg, setSvg] = useState('');
+  const [svgSize, setSvgSize] = useState<{ width: number; height: number } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const renderDiagram = async () => {
+      try {
+        const mermaid = (await import('mermaid')).default;
+        mermaid.initialize({
+          startOnLoad: false,
+          securityLevel: 'strict',
+          theme: 'base',
+          themeVariables: {
+            background: '#ffffff',
+            primaryColor: '#f8fafc',
+            primaryTextColor: '#0f172a',
+            primaryBorderColor: '#94a3b8',
+            lineColor: '#64748b',
+            secondaryColor: '#ecfeff',
+            tertiaryColor: '#fff7ed',
+            fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif',
+          },
+          flowchart: {
+            curve: 'basis',
+            htmlLabels: true,
+            useMaxWidth: false,
+          },
+        });
+        const diagramId = `docs-mermaid-${rawId.replace(/[^a-zA-Z0-9_-]/g, '')}`;
+        const result = await mermaid.render(diagramId, chart);
+        const widthMatch = result.svg.match(/\bwidth="([\d.]+)"/);
+        const heightMatch = result.svg.match(/\bheight="([\d.]+)"/);
+        if (!cancelled) {
+          setSvg(result.svg);
+          setSvgSize({
+            width: widthMatch ? Number(widthMatch[1]) : 1200,
+            height: heightMatch ? Number(heightMatch[1]) : 800,
+          });
+          setError(null);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setSvg('');
+          setSvgSize(null);
+          setError(err instanceof Error ? err.message : 'Unable to render Mermaid diagram.');
+        }
+      }
+    };
+
+    const queuedRender = docsMermaidRenderQueue.then(renderDiagram, renderDiagram);
+    docsMermaidRenderQueue = queuedRender.catch(() => undefined);
+    void queuedRender;
+    return () => {
+      cancelled = true;
+    };
+  }, [chart, rawId]);
+
+  const scaledSize = svgSize
+    ? {
+        width: Math.ceil(svgSize.width * scale),
+        height: Math.ceil(svgSize.height * scale),
+      }
+    : null;
 
   return (
     <div className="overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm">
@@ -938,57 +1108,76 @@ function ReportGoalWorkflowPreview() {
         <div>
           <div className="flex items-center gap-2 text-base font-semibold text-slate-950">
             <Workflow className="h-4 w-4 text-slate-600" />
-            Goal Topology / Aggregation
+            {title}
           </div>
-          <p className="mt-1 text-sm leading-6 text-slate-600">
-            A goal may complete directly, serially, through parts, or through accepted upstream work followed by aggregation.
-          </p>
+          <p className="mt-1 text-sm leading-6 text-slate-600">{description}</p>
         </div>
-        <span className="inline-flex h-7 items-center rounded-full border border-cyan-200 bg-cyan-50 px-3 text-xs font-semibold text-cyan-800">
-          {'Goal -> Items -> Optional aggregate'}
-        </span>
       </div>
-
-      <div className="grid gap-3 p-4 lg:grid-cols-6">
-        {reportGoalWorkflowSteps.map((step, index) => (
-          <div key={step.title} className="relative min-h-[150px] rounded-md border border-slate-200 bg-slate-50 p-3">
-            {index < reportGoalWorkflowSteps.length - 1 && (
-              <ArrowRight className="absolute -right-5 top-1/2 z-10 hidden h-5 w-5 -translate-y-1/2 text-slate-300 lg:block" />
-            )}
-            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{step.label}</div>
-            <h3 className="mt-2 text-sm font-semibold leading-5 text-slate-950">{step.title}</h3>
-            <p className="mt-2 text-xs leading-5 text-slate-600">{step.body}</p>
-          </div>
-        ))}
-      </div>
-
-      <div className="grid gap-4 border-t border-slate-200 bg-slate-50 p-4 lg:grid-cols-[1.1fr_0.9fr]">
-        <div>
-          <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
-            Bounded upstream work
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {evidenceLanes.map((lane) => (
-              <span key={lane} className="inline-flex h-8 items-center rounded-full border border-emerald-200 bg-emerald-50 px-3 text-xs font-semibold text-emerald-900">
-                {lane} item
-              </span>
-            ))}
-            <span className="inline-flex h-8 items-center rounded-full border border-sky-200 bg-sky-50 px-3 text-xs font-semibold text-sky-900">
-              Review gate
-            </span>
-            <span className="inline-flex h-8 items-center rounded-full border border-fuchsia-200 bg-fuchsia-50 px-3 text-xs font-semibold text-fuchsia-900">
-              Aggregation item
-            </span>
-          </div>
-        </div>
-        <div className="grid gap-2">
-          {supportNodes.map(([name, body]) => (
-            <div key={name} className="grid gap-1 border-l-2 border-cyan-300 pl-3">
-              <div className="text-xs font-semibold text-slate-950">{name}</div>
-              <div className="text-xs leading-5 text-slate-600">{body}</div>
+      <div
+        className="overflow-auto bg-white"
+        style={{
+          height: viewportHeight,
+          minHeight: 360,
+          resize: 'vertical',
+        }}
+      >
+        <div className="p-4 [&_.edgeLabel]:rounded [&_.edgeLabel]:bg-white/90 [&_svg]:h-auto [&_svg]:max-w-none">
+          {error ? (
+            <div className="grid gap-3">
+              <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm leading-6 text-rose-900">
+                Mermaid render failed: {error}
+              </div>
+              <pre className="max-h-[32rem] overflow-auto rounded-md bg-slate-950 p-4 text-xs leading-5 text-slate-100">
+                <code>{chart}</code>
+              </pre>
             </div>
-          ))}
+          ) : svg && scaledSize ? (
+            <div
+              style={{
+                width: scaledSize.width,
+                height: scaledSize.height,
+              }}
+            >
+              <div
+                style={{
+                  transform: `scale(${scale})`,
+                  transformOrigin: 'top left',
+                }}
+                dangerouslySetInnerHTML={{ __html: svg }}
+              />
+            </div>
+          ) : (
+            <div className="flex min-h-40 items-center justify-center text-sm text-slate-500">Rendering Mermaid diagram...</div>
+          )}
         </div>
+      </div>
+      <div className="border-t border-slate-200 bg-slate-50 px-4 py-2 text-xs leading-5 text-slate-500">
+        Mermaid viewport: {Math.round(scale * 100)}% scale, scrollable and vertically resizable.
+      </div>
+    </div>
+  );
+}
+
+function GoalTopologyWorkflowPreview() {
+  return (
+    <div className="grid gap-4">
+      <MermaidDiagram
+        title="Lead Polling / Goal Completion Flow"
+        description="完整控制流：Lead 被定时或事件唤醒，读取 lead.md 和 ledger，做 bounded frontier review，判断 topology，创建最小缺口 item，经 Coordinator 派发、Review、Fan-in，必要时汇总，最后关闭 Goal。"
+        chart={goalTopologyFlowMermaid}
+        scale={0.42}
+        viewportHeight={760}
+      />
+      <MermaidDiagram
+        title="Goal / Item / Role Relationship Map"
+        description="对象关系图：Project、Goal、WorkItem、Role、Coordinator、Lead workspace、Resource、File、Review、Memory 之间的持久关系。"
+        chart={goalObjectRelationshipMermaid}
+        scale={0.5}
+        viewportHeight={620}
+      />
+      <div className="rounded-md border border-cyan-200 bg-cyan-50 px-4 py-3 text-sm leading-6 text-cyan-950">
+        <strong className="font-semibold">拓扑模式：</strong> {goalTopologyModes.join(' / ')}。
+        Coordinator 只负责调度，Goal 是否完成仍由 Lead polling 根据 accepted items、resource gate、review 和 aggregation gate 判断。
       </div>
     </div>
   );
@@ -1803,6 +1992,18 @@ export function Docs() {
   }, []);
 
   useEffect(() => {
+    const hashId = window.location.hash.replace('#', '');
+    const section = articleSectionById.get(hashId);
+    if (!section || section.chapter !== activeChapterId) return;
+
+    const timeoutId = window.setTimeout(() => {
+      setActiveId(section.id);
+      document.getElementById(section.id)?.scrollIntoView({ block: 'start' });
+    }, 0);
+    return () => window.clearTimeout(timeoutId);
+  }, [activeChapterId]);
+
+  useEffect(() => {
     const targets = activeSections
       .map((section) => document.getElementById(section.id))
       .filter(Boolean) as HTMLElement[];
@@ -2098,43 +2299,42 @@ export function Docs() {
             </div>
           </Section>
 
-          <Section id="report-goal-fanout" eyebrow="AgentCraft Project" title="需要汇总的 Goal 与完成拓扑">
+          <Section id="goal-completion-topologies" eyebrow="AgentCraft Project" title="需要汇总的 Goal 与完成拓扑">
             <p>
               有些 goal 一个 item 就能完成，有些要串行推进，有些是总分结构，有些则需要多个上游 item 被接受后再汇总。
               Lead / Leader 负责判断当前 goal 和 linked items 是否已经足够；Planner 只在拆解不明显时辅助，Coordinator 只派发，不判断完成。
             </p>
-            <ReportGoalWorkflowPreview />
+            <GoalTopologyWorkflowPreview />
             <h3 className="pt-2 text-base font-semibold text-slate-950">对象关系与职责</h3>
-            <FieldTable rows={reportGoalFanoutRows} />
+            <FieldTable rows={goalTopologyRows} />
             <h3 className="pt-2 text-base font-semibold text-slate-950">Lead polling 在这个流程里做什么</h3>
-            <FieldTable rows={reportGoalLeadPollingRows} />
+            <FieldTable rows={goalTopologyLeadPollingRows} />
             <h3 className="pt-2 text-base font-semibold text-slate-950">拓扑型 item 的推荐形状</h3>
             <CodeBlock>
 {`{
-  "workType": "TECHNICAL_ANALYSIS",
+  "workType": "EVIDENCE_COLLECTION",
   "goalId": "<goal id>",
-  "dependsOn": ["<market-data-item-id>"],
+  "dependsOn": ["<upstream-item-id>"],
   "inputPacket": {
     "goalTopology": {
       "mode": "FAN_OUT_FAN_IN",
-      "runId": "2026-06-11-stock-cycle",
+      "runId": "<cycle-or-milestone-id>",
       "needsAggregation": true,
-      "aggregationArtifactPaths": ["reports/2026-06-11/dashboard.md"],
-      "acceptanceBar": "Owner-facing informational report with sources and risk disclosure."
+      "aggregationArtifactPaths": ["deliverables/<goal-id>/final-summary.md"],
+      "acceptanceBar": "Owner-facing deliverable with sources, caveats, and explicit decisions."
     },
     "workSlice": {
-      "lane": "technical-analysis",
-      "symbols": ["AAPL", "MSFT"],
-      "scope": "Trend, support/resistance, momentum, invalidation levels."
+      "lane": "source-research",
+      "scope": "Collect bounded evidence for one part of the goal and name blockers."
     },
     "projectFiles": [
-      { "path": "data/2026-06-11/AAPL-market-data.md", "source": "dependency" }
+      { "path": "inputs/<goal-id>/brief.md", "source": "owner" }
     ],
-    "requiredGlobals": ["stock_watchlist"]
+    "requiredGlobals": ["<required_resource_key>"]
   },
   "outputContract": {
     "type": "aggregation-input",
-    "sharedFiles": ["analysis/2026-06-11/AAPL-technical.md"],
+    "sharedFiles": ["work/<goal-id>/source-research.md"],
     "mustInclude": [
       "source paths read",
       "freshness or staleness notes",
@@ -2145,7 +2345,7 @@ export function Docs() {
 }`}
             </CodeBlock>
             <h3 className="pt-2 text-base font-semibold text-slate-950">Goal 何时可以 Done</h3>
-            <FieldTable rows={reportGoalCompletionRows} />
+            <FieldTable rows={goalTopologyCompletionRows} />
             <div className="rounded-md border border-cyan-200 bg-cyan-50 px-4 py-4 text-sm leading-7 text-cyan-950">
               <strong className="font-semibold">关键修复点：</strong>
               Lead / Planner 的 skill 需要把 goal topology 当成共同协议：Planner 负责提出 lane、phase、dependencies 和 aggregation contract，
