@@ -143,6 +143,15 @@ const articleSections: ArticleSection[] = [
     depth: 2,
   },
   {
+    id: 'report-goal-fanout',
+    label: 'AgentCraft Project',
+    chapter: 'project',
+    title: '需要汇总的 Goal 与完成拓扑',
+    description: 'Lead 先判断 goal 是直接、串行、总分、总分总还是 fan-out/fan-in；只有确实需要汇总交付物时，才在上游 item accepted 后创建 aggregation/synthesis item。',
+    keywords: ['goal topology', 'fan-out', 'fan-in', 'goal', 'work item', 'coordinator', 'memory', 'resource', 'aggregation', 'synthesis'],
+    depth: 2,
+  },
+  {
     id: 'event-graph',
     label: 'AgentCraft Project',
     chapter: 'project',
@@ -256,7 +265,7 @@ const articleSections: ArticleSection[] = [
     chapter: 'project',
     title: '轮询模式',
     description: '轮询模式让 Lead 或 PM 这类长期角色按配置周期性醒来检查 goal frontier、assignment health 和 owner action。',
-    keywords: ['polling', 'timed polling', 'IDLE_ONLY', 'FIXED_INTERVAL', 'Run polling now', 'lead ledger'],
+    keywords: ['polling', 'timed polling', 'IDLE_ONLY', 'FIXED_INTERVAL', 'Run polling now', 'lead workspace', 'lead ledger'],
     depth: 3,
   },
   {
@@ -582,6 +591,70 @@ const planWorkReadWriteRows: Array<[string, string]> = [
   ['Owner 怎么改', 'Owner 可以调整目标、验收标准、优先级和状态。已接受或已有证据的工作不要直接改成另一个意思；更好的做法是新增 follow-up 或取消 superseded item。'],
 ];
 
+const reportGoalFanoutRows: Array<[string, string]> = [
+  ['Goal', 'Owner-level outcome。Goal 要写明验收标准、范围、资源边界，以及是否需要最终汇总交付物。'],
+  ['Lead / Leader', '负责审 goal 和 linked items 是否足够，并判断拓扑：DIRECT、SERIAL、FAN_OUT_FAN_IN、TOTAL_TO_PARTS、TOTAL_PARTS_TOTAL 或 ITERATIVE_REVIEW。'],
+  ['Planner', '当拆解不明显时提出拓扑、lane/phase、dependencies、outputContract 和是否需要 aggregation。'],
+  ['Lead polling', 'Lead 通过定时 polling 或事件 wake 重新读取 goal frontier，用 ledger 判断是否跳过、补 item、创建 aggregation 或标记 DONE。'],
+  ['Work Items', '每条 lane/phase/step 是一个独立 READY item，带 goalTopology、workSlice、inputPacket.projectFiles、outputProjectFiles、requiredGlobals 和 outputContract。'],
+  ['Coordinator', '只负责按 dispatchRules、容量和资源门控派发 READY/NEEDS_REVISION item；它不判断 goal 是否完成。'],
+  ['Resource', '账号、token、输入文件、数据源、批准和 owner 偏好用 owner-owned resource/action item 表达；缺资源时不要派发依赖它的 worker。'],
+  ['Shared files', 'worker 必须把承诺的证据、source notes、中间分析、patch、包或最终交付物写入项目共享文件，并在 handoff 前反读验证路径存在。'],
+  ['Review', 'Reviewer 按 outputContract 验收每个 artifact。只有 ACCEPTED item 才能作为 downstream 或 aggregation 的上游输入。'],
+  ['Memory', 'Memory 只保存 review 认可的 durable facts、decisions、constraints、risks 和 open questions；不要把它当进度日志。'],
+  ['Sufficiency gate', 'Lead 汇总 linked item：已接受输出是否满足 goal、资源是否解决、review 是否通过、风险是否显式记录。不足就创建最小缺口 item。'],
+  ['Aggregation', '只有 goal 需要汇总交付物且 sufficiency gate 通过后才创建 aggregation/synthesis/delivery item。聚合角色必须读取 accepted upstream files/items。'],
+];
+
+const reportGoalLeadPollingRows: Array<[string, string]> = [
+  ['触发源', '定时 sweep 到期、手动 Run polling now、project activated、runtime-created/updated goal、assignment completed、resource request 或 owner todo completed。'],
+  ['空闲策略', 'IDLE_ONLY 下，Lead runtime 不可达或仍在 TYPING 时不会被打断；host 写入 pollingState.nextRunAt，稍后重试。'],
+  ['读取范围', '每轮先 resume，再读 coordination/lead.md、lead-goal-ledger、globals、active goals、linked item summaries、assignment/runtime-state 和 recent events；只有会影响判断时才读详情、文件和 memory。'],
+  ['跳过规则', '如果 ledger 中该 goal 的 statusDigest 未变化，且没有 READY/NEEDS_REVISION/IN_REVIEW/owner resource/failed assignment 等 lead-attention item，可以跳过。'],
+  ['输出动作', 'Lead 只创建或修正最小 READY/NEEDS_REVISION item、owner resource item、aggregation item，或在完成条件满足时更新 goal DONE；结束前更新 lead.md 的 cursor 和下轮队列。'],
+];
+
+const reportGoalCompletionRows: Array<[string, string]> = [
+  ['上游完整', '所有必要 lane/phase/step 已 ACCEPTED，或被明确 waived 并写明原因。'],
+  ['资源解决', 'requiredGlobals、owner approvals、输入文件和外部访问都已配置或明确不需要。'],
+  ['汇总判断', '如果 goal 不需要 aggregation，accepted items 自身就要满足验收标准；如果需要 aggregation，最终 artifact 要能通过 project-file-read 或 artifact 链接反查。'],
+  ['审核通过', '需要 review 的最终 artifact 或关键 item 已 ACCEPTED，且 reviewer 检查过来源、新鲜度、风险披露和 outputContract。'],
+  ['目标关闭', 'Lead 只在上述条件满足后把 goal 标为 DONE，并在 completion summary 里链接关键上游输出和最终 artifact。'],
+];
+
+const reportGoalWorkflowSteps = [
+  {
+    title: '1. Goal',
+    label: 'Owner outcome',
+    body: '定义验收标准、范围、人类资源边界，以及是否需要汇总交付物。',
+  },
+  {
+    title: '2. Plan',
+    label: 'Lead / Planner',
+    body: '判断 DIRECT、SERIAL、fan-out/fan-in、总分或总分总，写清 slice 和 output contract。',
+  },
+  {
+    title: '3. Dispatch',
+    label: 'Coordinator',
+    body: '按 workType、role、容量和资源门控派发 READY items。',
+  },
+  {
+    title: '4. Upstream',
+    label: 'Workers + Review',
+    body: '执行各自 lane、phase、step 或 revision，写共享文件并进入 review。',
+  },
+  {
+    title: '5. Fan-in',
+    label: 'Lead polling gate',
+    body: '定时或事件唤醒后读取 frontier 和 ledger，不足就补 item 或 owner resource。',
+  },
+  {
+    title: '6. Aggregate',
+    label: 'If needed',
+    body: '只有 goal 需要汇总时才读取 accepted upstream outputs，生成最终 artifact。',
+  },
+];
+
 const deliveryReviewRows: Array<[string, string]> = [
   ['Artifacts', 'Worker、Lead 或 human 提交的交付记录，可以包含 handoff notes、报告、patch link、外部 URL、附件，以及关联 project shared file resources。'],
   ['Reviews', '对 work item 的审核结论。状态包括 PENDING、APPROVED、CHANGES_REQUESTED、REJECTED；Reviewer type 可以是 Lead、review agent 或 human reviewer。'],
@@ -848,6 +921,79 @@ const eventGraphPreviewToneClasses: Record<string, string> = {
   message: 'border-sky-200 bg-sky-50 text-sky-950',
 };
 
+function ReportGoalWorkflowPreview() {
+  const evidenceLanes = ['Lane', 'Phase', 'Step', 'Revision'];
+  const supportNodes = [
+    ['Lead polling', 'scheduled or event-triggered frontier review; skipped when lead is already working'],
+    ['Lead workspace', 'coordination/lead.md stores the readable cursor, goal queue, and next-run plan'],
+    ['Lead ledger', 'coordination/lead-goal-ledger.jsonl stores per-goal status digests and last decisions'],
+    ['Resource gate', 'owner resource/action items block missing credentials, inputs, approvals, or data access'],
+    ['Shared files', 'workers write outputs and artifacts to durable project-file paths'],
+    ['Memory', 'reviewed durable facts and risks only; not routine progress'],
+  ];
+
+  return (
+    <div className="overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 px-4 py-3">
+        <div>
+          <div className="flex items-center gap-2 text-base font-semibold text-slate-950">
+            <Workflow className="h-4 w-4 text-slate-600" />
+            Goal Topology / Aggregation
+          </div>
+          <p className="mt-1 text-sm leading-6 text-slate-600">
+            A goal may complete directly, serially, through parts, or through accepted upstream work followed by aggregation.
+          </p>
+        </div>
+        <span className="inline-flex h-7 items-center rounded-full border border-cyan-200 bg-cyan-50 px-3 text-xs font-semibold text-cyan-800">
+          {'Goal -> Items -> Optional aggregate'}
+        </span>
+      </div>
+
+      <div className="grid gap-3 p-4 lg:grid-cols-6">
+        {reportGoalWorkflowSteps.map((step, index) => (
+          <div key={step.title} className="relative min-h-[150px] rounded-md border border-slate-200 bg-slate-50 p-3">
+            {index < reportGoalWorkflowSteps.length - 1 && (
+              <ArrowRight className="absolute -right-5 top-1/2 z-10 hidden h-5 w-5 -translate-y-1/2 text-slate-300 lg:block" />
+            )}
+            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{step.label}</div>
+            <h3 className="mt-2 text-sm font-semibold leading-5 text-slate-950">{step.title}</h3>
+            <p className="mt-2 text-xs leading-5 text-slate-600">{step.body}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="grid gap-4 border-t border-slate-200 bg-slate-50 p-4 lg:grid-cols-[1.1fr_0.9fr]">
+        <div>
+          <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+            Bounded upstream work
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {evidenceLanes.map((lane) => (
+              <span key={lane} className="inline-flex h-8 items-center rounded-full border border-emerald-200 bg-emerald-50 px-3 text-xs font-semibold text-emerald-900">
+                {lane} item
+              </span>
+            ))}
+            <span className="inline-flex h-8 items-center rounded-full border border-sky-200 bg-sky-50 px-3 text-xs font-semibold text-sky-900">
+              Review gate
+            </span>
+            <span className="inline-flex h-8 items-center rounded-full border border-fuchsia-200 bg-fuchsia-50 px-3 text-xs font-semibold text-fuchsia-900">
+              Aggregation item
+            </span>
+          </div>
+        </div>
+        <div className="grid gap-2">
+          {supportNodes.map(([name, body]) => (
+            <div key={name} className="grid gap-1 border-l-2 border-cyan-300 pl-3">
+              <div className="text-xs font-semibold text-slate-950">{name}</div>
+              <div className="text-xs leading-5 text-slate-600">{body}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const componentCards = [
   {
     icon: Users,
@@ -906,7 +1052,7 @@ const configurationPanelRows: Array<[string, string]> = [
 
 const roleSkillRows: Array<[string, string]> = [
   ['common entry skill', '每个 Project runtime 都先使用 skill://agent-workspace：解析 grant/token、resume 项目、读取 inbox/task packet、加载 memory/files，并按 scope 执行动作。'],
-  ['Lead Agent', 'common entry skill + lead/project-management skill + lead role prompt。负责 goal frontier、owner todo、lead ledger、最小 work item 创建和 Coordinator fallback。'],
+  ['Lead Agent', 'common entry skill + lead/project-management skill + lead role prompt。负责 goal frontier、owner todo、lead workspace/ledger、最小 work item 创建和 Coordinator fallback。'],
   ['Coordinator', '默认是 host-side 协调器，读取 template statusFlow、dispatchRules、capacity 和 launchability。若未来实现成 runtime，也应是 common entry skill + coordinator policy skill。'],
   ['Planner Agent', 'common entry skill + planning/template skill。把 intake、owner brief 或 research queue 拆成 goals/features/work items，并写入可审计计划。'],
   ['Worker Agent', 'common entry skill + domain skill。只加载被派发 assignment 的 task packet、相关 memory refs 和必要文件 helper，交付共享文件、artifact 或 handoff。'],
@@ -915,14 +1061,79 @@ const roleSkillRows: Array<[string, string]> = [
   ['Integrator Agent', 'common entry skill + integration skill。只在 accepted artifact 或明确 owner approval 后接触外部系统，并使用窄范围 integration credential。'],
 ];
 
+const leadPollingReadRows: Array<[string, string]> = [
+  ['resume / inbox', 'POST /v1/runtimes/{runtimeId}/resume，先读 inbox、active assignments、boardSnapshot 和事件游标。'],
+  ['lead workspace', 'GET /v1/projects/{projectId}/files/read?path=coordination/lead.md，恢复上轮 cursor、frontier policy、next goal queue 和 open blockers。'],
+  ['lead ledger', 'GET /v1/projects/{projectId}/files/read?path=coordination/lead-goal-ledger.jsonl，恢复每个 goal 的 latest statusDigest 和 last decision。'],
+  ['project globals', 'GET /v1/projects/{projectId}/globals?includeValues=true，确认 requiredGlobals、owner resource 是否已配置。'],
+  ['active goals', 'GET /v1/projects/{projectId}/goals?includeClosed=false&limit=100，不能只靠 boardSnapshot 判断没有目标。'],
+  ['goal items', 'GET /v1/projects/{projectId}/work-items?goalId=<goalId>&includeClosed=true&limit=100&page=1，逐 goal 判断证据是否足够。'],
+  ['item detail', 'GET /v1/projects/{projectId}/work-items/{workItemId}，只在要接受、修正、去重、创建下一项时读详情。'],
+  ['assignment health', 'GET $AIFACTORY_API_BASE_URL/projects/{projectId}/assignments/runtime-state?limit=100，识别 stale/open assignment 和 assignee runtime 可用性。'],
+  ['events', 'GET /v1/projects/{projectId}/events，用于理解这次 wake 是由 review、resource、assignment 还是 goal 变化触发。'],
+  ['shared files', 'GET /v1/projects/{projectId}/files 和 /files/read，只读取 accepted outputs、handoff、outputContract 或候选 aggregation artifact 明确引用的路径。'],
+  ['memory', 'GET /v1/projects/{projectId}/memories?q=...&memoryType=...，只检索可复用事实、约束、风险和开放问题。'],
+];
+
+const leadPollingWriteRows: Array<[string, string]> = [
+  ['create work item', 'POST $AIFACTORY_API_BASE_URL/projects/{projectId}/work-items/runtime-create，用 host helper 创建可调度 READY/NEEDS_REVISION item 并触发 coordinator。'],
+  ['owner resource item', 'POST $AGENT_WORKSPACE_BASE_URL/v1/projects/{projectId}/work-items，创建 owner-owned resource/action item，inputPacket.resourceRequest 一次只请求一个 key。'],
+  ['goal update', 'PATCH $AIFACTORY_API_BASE_URL/projects/{projectId}/goals/{goalId}/runtime-update，只允许 OPEN/IN_PROGRESS/BLOCKED/DONE 等 runtime 允许状态。'],
+  ['assignment repair', 'PATCH $AIFACTORY_API_BASE_URL/projects/{projectId}/work-items/{workItemId}/assignments/{assignmentId}/runtime-update，把 stale open assignment 标 FAILED 后再继续派发。'],
+  ['runtime comment', 'POST $AIFACTORY_API_BASE_URL/projects/{projectId}/work-items/{workItemId}/runtime-comments，向 owner 或后续 agent 留可见问题。'],
+  ['lead workspace', 'POST /v1/projects/{projectId}/files/write，写 coordination/lead.md，保存人类可读的 frontier、cursor、优先级和下轮计划。'],
+  ['lead ledger', 'POST /v1/projects/{projectId}/files/write，追加 coordination/lead-goal-ledger.jsonl，每个 inspected goal 一条机器可比对 checkpoint。'],
+];
+
+const leadWorkspaceRows: Array<[string, string]> = [
+  ['coordination/lead.md', 'Lead 的人类可读工作台。记录 frontier policy、polling cursor、active goal queue、项目级判断和 open blockers。它帮助下一轮 Lead 接着扫，不依赖聊天历史。'],
+  ['coordination/lead-goal-ledger.jsonl', '机器可读 checkpoint。每个 goal 一条或多条 JSONL 记录，包含 statusDigest、topology、decision、nextAction、createdWorkItemIds。'],
+  ['职责边界', 'lead.md 是摘要和计划，不是唯一真相；goal/work item/assignment/review/resource 仍以 workspace API 和 host API 为准。'],
+  ['读取方式', 'Polling prompt 只注入路径和规则，不直接把 lead.md 全量塞进系统 prompt。Lead 通过 project-file-read 读取，避免 token 变长和授权边界不清。'],
+  ['写入时机', '每轮开始读 lead.md；每检查一个 goal 追加 ledger；如果一轮扫不完，结束前更新 lead.md 的 nextGoalCursor、unfinishedScanReason、nextGoalQueue。'],
+  ['拆分策略', 'lead.md 保持项目级摘要。超复杂 goal 可以再拆 coordination/goals/<goalId>.md，但普通项目不需要为每个 goal 都建文件。'],
+];
+
+const leadWorkspaceTemplate = `# Lead Workspace
+
+## Current Frontier Policy
+- Max goals per polling tick: 5
+- Priority order: lead-attention items, changed digest, blocked goals, oldest unchecked
+
+## Polling Cursor
+- lastRunId:
+- nextGoalCursor:
+- unfinishedScanReason:
+
+## Active Goal Queue
+| goalId | topology | lastDigest | leadAttention | nextAction |
+|---|---|---|---|---|
+
+## Project-Level Decisions
+-
+
+## Open Risks / Owner Gates
+-`;
+
 const pollingModeRows: Array<[string, string]> = [
   ['manual chat', 'Owner 或成员主动给 agent 发消息。适合一次性追问、修复提示、人工确认和不需要自动扫描的角色。'],
   ['timed polling', '开启轮询开关后，runtime 到期会启动一个 fresh session，用配置的 Polling message 检查项目状态。'],
   ['IDLE_ONLY', '只有 runtime 空闲时才发起轮询，适合 Lead / PM 的后台巡检，避免打断正在执行的 assignment。'],
   ['FIXED_INTERVAL', '按固定分钟间隔触发。适合需要稳定节奏的项目观察，但要控制 interval 和 message 范围。'],
   ['Run polling now', '手动强制执行一次 polling tick。当前实现会避免并发重复 tick；如果 runtime stale，本地 runtime 会优先尝试 reconnect。'],
-  ['lead ledger', '长跑 Lead / PM polling 应把进度写入 coordination/lead-goal-ledger.jsonl，用 goal digest 跳过未变化且无需 lead attention 的目标。'],
+  ['lead workspace', '长跑 Lead / PM polling 应维护 coordination/lead.md，保存人类可读 cursor、下轮队列和项目级判断。'],
+  ['lead ledger', '每个 inspected goal 的机器 checkpoint 写入 coordination/lead-goal-ledger.jsonl，用 goal digest 跳过未变化且无需 lead attention 的目标。'],
   ['recommended roles', 'Lead 和 PM 最适合轮询；Coordinator 由 host tick/dispatchRules 驱动；Worker、Reviewer、Integrator 默认应由 assignment 或明确消息驱动。'],
+];
+
+const pollingTriggerRows: Array<[string, string]> = [
+  ['scheduled sweep', '后台 sweep 到达 nextRunAt 后调用 tickAgentRuntimePolling；若 runtime 不可达或仍在工作则延后。'],
+  ['Run polling now', '成员配置面板可手动触发 POST /projects/:id/agent-runtimes/:memberId/polling/tick?force=true。'],
+  ['project activated', 'Project 从 PAUSED/ARCHIVED 回到 ACTIVE 时，会开启 coordinator 和 Lead polling，并排一次 lead wake。'],
+  ['goal change', 'runtime-created goal 或非 Lead runtime 更新 goal 会 scheduleLeadPollingWake，让 Lead 复核目标前沿。'],
+  ['assignment completed', 'worker assignment COMPLETED 后会唤醒 Lead，Lead 决定是否验收、补 item 或进入 synthesis。'],
+  ['resource/action completed', 'Owner 完成 resource request 或 owner todo 后会唤醒 Lead，Lead 重新检查依赖它的 blocked work。'],
+  ['dedupe / busy guard', 'wake 会 750ms 合并；20 秒内已触发过则跳过；Lead 正在 TYPING 时写 nextRunAt，不打断当前会话。'],
 ];
 
 const statusPills: Array<[string, string]> = [
@@ -1018,7 +1229,7 @@ const sharedFileImplementationRows: Array<[string, string]> = [
 
 const sharedFileReadWriteRows: Array<[string, string]> = [
   ['什么时候读', '启动/恢复时读 task packet 指定的 projectFiles；执行前读 brief、输入数据、接口契约、前人报告；review 时读 handoff 证据和提交文件。'],
-  ['什么时候写', '产出报告、证据、数据集、截图、review 包、长文档、队列文件、lead ledger 或 outputContract 明确要求的共享路径时写。'],
+  ['什么时候写', '产出报告、证据、数据集、截图、review 包、长文档、队列文件、lead workspace/ledger 或 outputContract 明确要求的共享路径时写。'],
   ['什么时候不写', '临时日志、容器中间文件、短期 URL、secret、只对当前 turn 有意义的草稿不应写入共享文件；secret 应走 owner resource/project globals。'],
   ['写完必须做什么', 'agent 不能只说“我写了”。必须用 project-file-list 或 project-file-read 反查 exact path，确认共享路径可见后再完成 assignment。'],
 ];
@@ -1887,6 +2098,62 @@ export function Docs() {
             </div>
           </Section>
 
+          <Section id="report-goal-fanout" eyebrow="AgentCraft Project" title="需要汇总的 Goal 与完成拓扑">
+            <p>
+              有些 goal 一个 item 就能完成，有些要串行推进，有些是总分结构，有些则需要多个上游 item 被接受后再汇总。
+              Lead / Leader 负责判断当前 goal 和 linked items 是否已经足够；Planner 只在拆解不明显时辅助，Coordinator 只派发，不判断完成。
+            </p>
+            <ReportGoalWorkflowPreview />
+            <h3 className="pt-2 text-base font-semibold text-slate-950">对象关系与职责</h3>
+            <FieldTable rows={reportGoalFanoutRows} />
+            <h3 className="pt-2 text-base font-semibold text-slate-950">Lead polling 在这个流程里做什么</h3>
+            <FieldTable rows={reportGoalLeadPollingRows} />
+            <h3 className="pt-2 text-base font-semibold text-slate-950">拓扑型 item 的推荐形状</h3>
+            <CodeBlock>
+{`{
+  "workType": "TECHNICAL_ANALYSIS",
+  "goalId": "<goal id>",
+  "dependsOn": ["<market-data-item-id>"],
+  "inputPacket": {
+    "goalTopology": {
+      "mode": "FAN_OUT_FAN_IN",
+      "runId": "2026-06-11-stock-cycle",
+      "needsAggregation": true,
+      "aggregationArtifactPaths": ["reports/2026-06-11/dashboard.md"],
+      "acceptanceBar": "Owner-facing informational report with sources and risk disclosure."
+    },
+    "workSlice": {
+      "lane": "technical-analysis",
+      "symbols": ["AAPL", "MSFT"],
+      "scope": "Trend, support/resistance, momentum, invalidation levels."
+    },
+    "projectFiles": [
+      { "path": "data/2026-06-11/AAPL-market-data.md", "source": "dependency" }
+    ],
+    "requiredGlobals": ["stock_watchlist"]
+  },
+  "outputContract": {
+    "type": "aggregation-input",
+    "sharedFiles": ["analysis/2026-06-11/AAPL-technical.md"],
+    "mustInclude": [
+      "source paths read",
+      "freshness or staleness notes",
+      "findings supported by evidence",
+      "blockers and missing data"
+    ]
+  }
+}`}
+            </CodeBlock>
+            <h3 className="pt-2 text-base font-semibold text-slate-950">Goal 何时可以 Done</h3>
+            <FieldTable rows={reportGoalCompletionRows} />
+            <div className="rounded-md border border-cyan-200 bg-cyan-50 px-4 py-4 text-sm leading-7 text-cyan-950">
+              <strong className="font-semibold">关键修复点：</strong>
+              Lead / Planner 的 skill 需要把 goal topology 当成共同协议：Planner 负责提出 lane、phase、dependencies 和 aggregation contract，
+              Coordinator 负责派发，Worker 写共享文件，Reviewer 接受输出，Lead polling 反复执行 frontier review。
+              只有 goal 确实需要汇总且 fan-in gate 通过后，Lead 才创建 aggregation/synthesis/delivery item；否则 accepted items 足够时可以直接关闭 goal。
+            </div>
+          </Section>
+
           <Section id="event-graph" eyebrow="AgentCraft Project" title="Event Graph">
             <p>
               Event Graph 是 Project 的关系视图。Board 告诉你当前有哪些工作项，Memory 保存可复用语义上下文，Shared Files 保存文件型证据；Event Graph 负责把这些对象按事件关系连起来，让 owner、Lead 和 reviewer 看清“谁做了什么、为什么出现、影响到哪里”。
@@ -2082,11 +2349,19 @@ export function Docs() {
                 ['owner todo', '账号、token、批准、范围澄清等必须由 Owner 提供的资源，被拆成 owner-owned work items。'],
                 ['lead skill stack', '通常包含 skill://agent-workspace、template lead/project-management skill 和 Lead role prompt。workspace skill 负责授权与上下文，role skill 负责判断策略。'],
                 ['polling mode', '适合开启 timed polling，用固定消息周期性检查 goal frontier、IN_REVIEW、READY、NEEDS_REVISION、owner action 和 stale assignment。'],
-                ['lead ledger', '长期 polling 可把进度写入 coordination/lead-goal-ledger.jsonl，避免每次从头扫描。'],
+                ['lead workspace', '长期 polling 维护 coordination/lead.md，保存 frontier policy、cursor、下轮队列和项目级判断。'],
+                ['lead ledger', '每个 inspected goal 的 checkpoint 写入 coordination/lead-goal-ledger.jsonl，避免每次从头扫描。'],
                 ['config panel', 'Owner 可在成员面板打开 Skills、Scope、Prompt 和 polling config，检查 Lead 当前拿到的技能、授权、系统指令和轮询策略。'],
                 ['dispatch fallback', 'Coordinator 禁用/不可用或 owner 明确要求时，才对 READY/NEEDS_REVISION item 手动 runtime-dispatch；失败时先检查 assignment 状态再重试。'],
               ]}
             />
+            <h3 className="pt-2 text-base font-semibold text-slate-950">Lead 持久工作台</h3>
+            <FieldTable rows={leadWorkspaceRows} />
+            <CodeBlock>{leadWorkspaceTemplate}</CodeBlock>
+            <h3 className="pt-2 text-base font-semibold text-slate-950">Lead polling 每轮读取什么</h3>
+            <FieldTable rows={leadPollingReadRows} />
+            <h3 className="pt-2 text-base font-semibold text-slate-950">Lead polling 常用写接口</h3>
+            <FieldTable rows={leadPollingWriteRows} />
           </Section>
 
           <Section id="roles" eyebrow="AgentCraft Project" title="主要组件与角色">
@@ -2121,6 +2396,33 @@ export function Docs() {
               轮询模式用于长期角色的自动醒来，而不是让所有 agent 都无限自驱。Owner 在成员配置面板中开启 timed polling，配置 strategy、interval 和 polling message；runtime 到期后会以新的会话执行一次项目巡检。
             </p>
             <FieldTable rows={pollingModeRows} />
+            <h3 className="pt-2 text-base font-semibold text-slate-950">Lead polling 触发源</h3>
+            <FieldTable rows={pollingTriggerRows} />
+            <h3 className="pt-2 text-base font-semibold text-slate-950">建议 Lead polling message</h3>
+            <CodeBlock>
+{`Run a lead polling frontier review.
+
+Wake reason: {{reason}}
+
+Read coordination/lead.md if present, then read coordination/lead-goal-ledger.jsonl.
+Reload project globals, active goals, linked work item summaries, assignment/runtime state, recent events, targeted shared files, and targeted memory.
+Process only the highest-priority changed goals that fit this tick budget.
+
+For each active goal:
+1. compute the current goal/item/assignment status digest
+2. skip only if the digest is unchanged and no lead-attention item exists
+3. classify the completion topology: DIRECT, SERIAL, FAN_OUT_FAN_IN, TOTAL_TO_PARTS, TOTAL_PARTS_TOTAL, or ITERATIVE_REVIEW
+4. read exact item details, files, and memory only when they can change this decision
+5. create missing owner resource/action items when resources are absent
+6. create the smallest missing work/review/revision item when the sufficiency gate fails
+7. create aggregation/synthesis/delivery work only when accepted upstream work is enough and the goal requires a combined deliverable
+8. mark the goal DONE only after accepted items or accepted aggregation satisfy the goal acceptance bar
+9. append one lead-goal-ledger JSONL record after inspecting the goal
+
+Before stopping, update coordination/lead.md with polling cursor, skipped reasons, next goal queue, unresolved blockers, and any project-level decisions.
+
+When coordinator is enabled, create or refine READY/NEEDS_REVISION items and leave dispatch to the coordinator.`}
+            </CodeBlock>
             <div className="rounded-md border border-slate-200 bg-white px-4 py-4 text-sm leading-7 text-slate-700">
               Worker、Reviewer、Integrator 默认不要开宽泛轮询。除非 role prompt 明确限定它只检查自己的 assignment 或已接受产物，否则这类角色应由 Coordinator dispatch、owner message 或 review request 唤醒。
             </div>

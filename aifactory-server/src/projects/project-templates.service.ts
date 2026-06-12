@@ -142,7 +142,10 @@ const FALLBACK_DEFAULT_TEMPLATE: ProjectTemplateConfig = {
   description:
     'Built-in fallback default project template used when the agent-workspace project-templates directory is unavailable.',
   version: '0.1',
-  settings: {},
+  settings: {
+    maxActiveAgents: 10,
+    maxActiveGoals: 5,
+  },
   roleLaunchProfiles: [],
   projectFileFolders: [],
   roles: [
@@ -236,6 +239,11 @@ export class ProjectTemplatesService {
         label: template.name,
         description: template.description || 'Personal project template saved from one of your projects.',
         version: 'personal',
+        settings: template.snapshotSummary?.settings &&
+          typeof template.snapshotSummary.settings === 'object' &&
+          !Array.isArray(template.snapshotSummary.settings)
+          ? template.snapshotSummary.settings
+          : undefined,
         workItemStatusFlow: template.snapshotSummary?.workItemStatusFlow &&
           typeof template.snapshotSummary.workItemStatusFlow === 'object' &&
           !Array.isArray(template.snapshotSummary.workItemStatusFlow)

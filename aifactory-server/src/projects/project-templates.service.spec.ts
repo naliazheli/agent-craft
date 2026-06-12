@@ -76,15 +76,17 @@ describe('ProjectTemplatesService', () => {
     expect(lead?.initialPrompt).toContain('inputPacket.requiredGlobals set to those exact keys');
     expect(lead?.initialPrompt).toContain('The coordinator will hold the continuation while requiredGlobals are missing');
     expect(lead?.polling?.message).toContain('analysed/ project-address records');
+    expect(lead?.polling?.message).toContain('do not create a new generic HackerOne Opportunity Discovery/Ongoing Target goal');
     expect(lead?.polling).toEqual(
       expect.objectContaining({
         enabled: true,
         strategy: 'IDLE_ONLY',
-        intervalMinutes: 1,
+        intervalMinutes: 10,
       }),
     );
     const planner = template.roles.find((entry) => entry.role === 'PLANNER_AGENT');
     expect(planner?.initialPrompt).toContain('HackerOne opportunity discovery');
+    expect(planner?.initialPrompt).toContain('When any unfinished goal other than that explicit meta goal exists');
     expect(planner?.initialPrompt).toContain('create the smallest linked READY SECURITY_TEST Phase 1 work item');
     expect(planner?.initialPrompt).toContain('/goals/runtime-create');
     expect(planner?.initialPrompt).toContain('/work-items/runtime-create');
@@ -166,8 +168,8 @@ describe('ProjectTemplatesService', () => {
       ]),
     );
     const lead = template.roles.find((entry) => entry.role === 'LEAD_AGENT');
-    expect(lead?.initialPrompt).toContain('leave it for the COORDINATOR');
-    expect(lead?.initialPrompt).toContain('do not call runtime-dispatch yourself');
+    expect(lead?.initialPrompt).toContain('treat the COORDINATOR as the primary dispatcher');
+    expect(lead?.initialPrompt).toContain('use runtime-dispatch as a fallback');
   });
 });
 

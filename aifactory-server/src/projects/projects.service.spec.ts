@@ -51,7 +51,7 @@ describe('ProjectsService project names', () => {
     expect(config.initialPrompt).not.toMatch(/\b(?:X\/Twitter|Twitter)\b/i);
   });
 
-  it('tells lead runtimes to avoid duplicate dispatch when the coordinator is enabled', async () => {
+  it('tells lead runtimes to prefer coordinator dispatch and use lead dispatch as fallback', async () => {
     const leadService = new ProjectsService(
       {} as never,
       {} as never,
@@ -71,14 +71,43 @@ describe('ProjectsService project names', () => {
     });
 
     expect(prompt).toContain('workItemStatusFlow.coordinator.enabled');
-    expect(prompt).toContain('Do not call runtime-dispatch while the coordinator is enabled');
-    expect(prompt).toContain('Manual dispatch fallback only');
+    expect(prompt).toContain('treat the COORDINATOR as the primary dispatcher');
+    expect(prompt).toContain('Use runtime-dispatch from the lead role as a fallback');
+    expect(prompt).toContain('Lead dispatch fallback');
     expect(prompt).toContain('/goals?includeClosed=false&limit=100');
     expect(prompt).toContain('/work-items?goalId=<goalId>&includeClosed=true&limit=100&page=1');
     expect(prompt).toContain('/work-items/{workItemId}');
+    expect(prompt).toContain('copy projectId, goalId, workItemId, and assignmentId exactly');
     expect(prompt).toContain('coordination/lead-goal-ledger.jsonl');
     expect(prompt).toContain('statusDigest');
     expect(prompt).toContain('Do not create ordinary INTEGRATION items for status reports');
+  });
+
+  it('initializes the lead workspace file without relying on chat history', async () => {
+    const agentWorkspaceClient = {
+      createProjectFolder: jest.fn().mockResolvedValue({}),
+      readProjectFile: jest.fn().mockRejectedValue(new Error('not found')),
+      writeProjectFile: jest.fn().mockResolvedValue({}),
+    };
+    const leadService = new ProjectsService(
+      {} as never,
+      agentWorkspaceClient as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { get: () => undefined } as never,
+      {} as never,
+    ) as any;
+
+    await leadService.ensureProjectLeadWorkspaceFile('project-1');
+
+    expect(agentWorkspaceClient.createProjectFolder).toHaveBeenCalledWith('project-1', 'coordination');
+    expect(agentWorkspaceClient.writeProjectFile).toHaveBeenCalledWith('project-1', expect.objectContaining({
+      path: 'coordination/lead.md',
+      content: expect.stringContaining('# Lead Workspace'),
+      contentType: 'text/markdown; charset=utf-8',
+    }));
+    expect(agentWorkspaceClient.writeProjectFile.mock.calls[0][1].content).toContain('nextGoalCursor');
   });
 
   it('adds HackerOne gate and routing instructions to lead project context', async () => {
@@ -597,6 +626,48 @@ describe('ProjectsService project names', () => {
       1500,
     );
     expect(goal).toEqual({ id: 'goal-1', title: 'Smoke goal' });
+  });
+
+  it('rejects generic HackerOne discovery goals while unfinished goals exist', async () => {
+    const prisma = {
+      projectGoal: {
+        count: jest.fn().mockResolvedValue(1),
+        create: jest.fn(),
+        findMany: jest.fn(),
+      },
+    };
+    const runtimeService = new ProjectsService(
+      prisma as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { get: () => undefined } as never,
+      {} as never,
+    ) as any;
+    runtimeService.authenticateProjectRuntimeToken = jest.fn().mockResolvedValue({
+      role: 'LEAD_AGENT',
+      userId: 'lead-user',
+    });
+    runtimeService.ensureProjectAccess = jest.fn().mockResolvedValue({
+      id: 'project-1',
+      ownerId: 'owner-user',
+      settings: { projectTemplateId: 'hackerone-opportunity-research' },
+    });
+
+    await expect(runtimeService.createGoalFromRuntime('project-1', 'runtime-token', {
+      title: 'HackerOne Opportunity Discovery - Ongoing Target Scouting',
+      description: 'Meta-goal for ongoing HackerOne opportunity discovery from https://hackerone.com/opportunities/all.',
+    })).rejects.toThrow('HackerOne generic opportunity discovery goals are not created while unfinished goals exist');
+
+    expect(prisma.projectGoal.count).toHaveBeenCalledWith({
+      where: {
+        projectId: 'project-1',
+        status: { in: ['OPEN', 'IN_PROGRESS', 'BLOCKED'] },
+      },
+    });
+    expect(prisma.projectGoal.findMany).not.toHaveBeenCalled();
+    expect(prisma.projectGoal.create).not.toHaveBeenCalled();
   });
 
   it('updates goals through the runtime helper for authorized planning roles', async () => {
@@ -2261,6 +2332,9 @@ describe('ProjectsService project names', () => {
       assignments: [],
     };
     const prisma = {
+      projectGoal: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
       projectWorkItem: {
         create: jest.fn().mockResolvedValue(createdWorkItem),
         findMany: jest.fn().mockResolvedValue([]),
@@ -2309,6 +2383,53 @@ describe('ProjectsService project names', () => {
         ownerId: undefined,
       }),
     }));
+  });
+
+  it('rejects generic HackerOne opportunity discovery runtime work while target goals are unfinished', async () => {
+    const prisma = {
+      projectGoal: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            title: 'Anthropic HackerOne BBP research',
+            description: 'Target program: https://hackerone.com/anthropic?type=team',
+          },
+        ]),
+      },
+      projectWorkItem: {
+        create: jest.fn(),
+        findMany: jest.fn(),
+      },
+    };
+    const runtimeService = new ProjectsService(
+      prisma as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { get: () => undefined } as never,
+      {} as never,
+    ) as any;
+    runtimeService.authenticateProjectRuntimeToken = jest.fn().mockResolvedValue({
+      role: 'PLANNER_AGENT',
+      userId: 'planner-user',
+    });
+    runtimeService.ensureProjectAccess = jest.fn().mockResolvedValue({
+      settings: { projectTemplateId: 'hackerone-opportunity-research' },
+    });
+
+    await expect(runtimeService.createWorkItemFromRuntime('project-1', 'runtime-token', {
+      goalId: 'meta-goal',
+      title: 'HackerOne Opportunity Discovery - batch scan',
+      workType: 'SECURITY_TEST',
+      status: 'READY',
+      inputPacket: {
+        source: 'agent-runtime',
+        opportunitySource: 'https://hackerone.com/opportunities/all',
+        outputProjectFiles: ['analysed/project-addresses.jsonl', 'opportunities/analyzed.jsonl'],
+      },
+    })).rejects.toThrow('HackerOne generic opportunity discovery work items are not created while unfinished target goals exist');
+
+    expect(prisma.projectWorkItem.create).not.toHaveBeenCalled();
   });
 
   it('lets authorized runtimes read work item comments through the runtime helper', async () => {
@@ -3427,6 +3548,88 @@ describe('ProjectsService project names', () => {
       memberId: 'planner-member',
       role: 'PLANNER_AGENT',
       workItemId: 'discovery-1',
+    }));
+  });
+
+  it('coordinator blocks generic HackerOne discovery items while target goals are unfinished', async () => {
+    const settings = {
+      projectTemplateId: 'hackerone-opportunity-research',
+      workItemStatusFlow: {
+        initialStatus: 'READY',
+        dispatchRules: [
+          {
+            statuses: ['READY'],
+            workTypes: ['OPPORTUNITY_DISCOVERY'],
+            role: 'PLANNER_AGENT',
+            launchMode: 'local-docker',
+            agentType: 'pi',
+            maxAgents: 1,
+          },
+        ],
+        coordinator: { enabled: true, maxDispatchesPerTick: 1, maxAgentsByRole: { PLANNER_AGENT: 1 } },
+      },
+    };
+    const prisma = {
+      projectGoal: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            title: 'Anthropic HackerOne BBP research',
+            description: 'Target program: https://hackerone.com/anthropic?type=team',
+          },
+        ]),
+      },
+      projectWorkItem: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 'discovery-1',
+            title: 'HackerOne Opportunity Discovery - Batch 2',
+            description: null,
+            scopeBrief: null,
+            acceptanceCriteria: null,
+            status: 'READY',
+            workType: 'OPPORTUNITY_DISCOVERY',
+            ownerId: null,
+            assignments: [],
+            goal: { id: 'meta-goal', title: 'HackerOne Opportunity Discovery - Ongoing Target Scouting' },
+            inputPacket: {
+              source: 'agent-runtime',
+              opportunitySource: 'https://hackerone.com/opportunities/all',
+              outputProjectFiles: ['analysed/project-addresses.jsonl', 'opportunities/analyzed.jsonl'],
+            },
+            outputContract: {},
+          },
+        ]),
+      },
+    };
+    const agentWorkspaceClient = {
+      recordProjectEvent: jest.fn().mockResolvedValue({}),
+    };
+    const runtimeService = new ProjectsService(
+      prisma as never,
+      agentWorkspaceClient as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { get: () => undefined } as never,
+      {} as never,
+    ) as any;
+    runtimeService.ensureProjectManager = jest.fn().mockResolvedValue({ ownerId: 'owner-user', settings });
+    runtimeService.resolveProjectGlobalVariables = jest.fn().mockResolvedValue([]);
+    runtimeService.reconcileStaleOpenAssignments = jest.fn().mockResolvedValue([]);
+    runtimeService.ensurePlannerItemsForUnanalysedGoals = jest.fn().mockResolvedValue([]);
+    runtimeService.listLaunchableRoleSummaries = jest.fn().mockResolvedValue([{ role: 'PLANNER_AGENT' }]);
+    runtimeService.launchAgentRuntime = jest.fn();
+    runtimeService.createAssignment = jest.fn();
+    runtimeService.wakeRuntimeForAssignment = jest.fn();
+
+    const result = await runtimeService.tickProjectCoordinator('project-1', 'owner-user');
+
+    expect(runtimeService.createAssignment).not.toHaveBeenCalled();
+    expect(runtimeService.launchAgentRuntime).not.toHaveBeenCalled();
+    expect(result.dispatched).toEqual([]);
+    expect(result.blocked[0]).toEqual(expect.objectContaining({
+      workItemId: 'discovery-1',
+      reason: 'GENERIC_DISCOVERY_BLOCKED_BY_TARGET_GOAL',
     }));
   });
 
@@ -5417,14 +5620,14 @@ describe('ProjectsService project globals', () => {
             ],
           },
         }),
-        update: jest.fn().mockResolvedValue({
+        update: jest.fn().mockImplementation(async ({ data }: any) => ({
           id: 'project-1',
           ownerId: 'owner-1',
-          settings: {},
+          settings: data.settings,
           owner: null,
           leadAgent: null,
           _count: { members: 0, workItems: 0, artifacts: 0 },
-        }),
+        })),
       },
     };
     const agentWorkspaceClient = {
@@ -5443,6 +5646,9 @@ describe('ProjectsService project globals', () => {
     ) as any;
     jest.spyOn(service, 'syncProjectCapabilityBundles').mockResolvedValue(undefined);
     jest.spyOn(service, 'syncProjectGlobalResourceTasks').mockResolvedValue(undefined);
+    const syncSpy = jest
+      .spyOn(service, 'syncProjectGlobalsToRuntimeSessions')
+      .mockResolvedValue({ updated: 0, skipped: [] });
 
     await service.updateProject('project-1', 'owner-1', {
       settings: {
@@ -5483,6 +5689,15 @@ describe('ProjectsService project globals', () => {
           ],
         }),
       }),
+    );
+    expect(syncSpy).toHaveBeenCalledWith(
+      'project-1',
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: 'hackerone_api_token',
+          value: 'new-secret-token',
+        }),
+      ]),
     );
   });
 
@@ -5593,20 +5808,19 @@ describe('ProjectsService project globals', () => {
     });
     expect(agentWorkspaceClient.updateProjectGlobals).toHaveBeenCalledWith(
       'project-1',
-      [expectedGoalGlobal],
+      expect.arrayContaining([
+        expectedGoalGlobal,
+        expect.objectContaining({
+          key: 'hackerone_api_token',
+          value: 'existing-h1-token',
+          scope: 'project',
+        }),
+      ]),
       expect.objectContaining({
         updatedByUserId: 'owner-1',
         workItemId: 'work-item-1',
         source: 'work-item-resource-request',
       }),
-    );
-    expect(agentWorkspaceClient.updateProjectGlobals.mock.calls[0][1]).not.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          key: 'hackerone_api_token',
-          value: 'existing-h1-token',
-        }),
-      ]),
     );
     expect(syncSpy).toHaveBeenCalledWith(
       'project-1',
@@ -5630,6 +5844,88 @@ describe('ProjectsService project globals', () => {
       },
     });
     expect(prisma.projectWorkItem.update.mock.calls[0][0].data.inputPacket.resourceRequest).not.toHaveProperty('value');
+  });
+
+  it('keeps project resource requests project-scoped when they are attached to a goal work item', async () => {
+    const prisma = {
+      project: {
+        findUnique: jest.fn().mockResolvedValue({
+          ownerId: 'owner-1',
+          settings: { projectGlobals: [] },
+        }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      projectFeature: {
+        findFirst: jest.fn(),
+      },
+      projectWorkItem: {
+        update: jest.fn().mockResolvedValue({}),
+      },
+    };
+    const agentWorkspaceClient = {
+      updateProject: jest.fn().mockResolvedValue({}),
+      updateProjectGlobals: jest.fn().mockResolvedValue({}),
+    };
+    const service = new ProjectsService(
+      prisma as never,
+      agentWorkspaceClient as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { get: () => undefined } as never,
+      {} as never,
+    ) as any;
+    jest.spyOn(service, 'resolveProjectGlobalVariables').mockResolvedValue([
+      {
+        key: 'hackerone_api_token',
+        label: 'HackerOne API token',
+        value: 'existing-h1-token',
+        isSecret: true,
+        scope: 'project',
+      },
+    ]);
+    jest.spyOn(service, 'syncProjectGlobalResourceTasks').mockResolvedValue(undefined);
+    jest.spyOn(service, 'syncProjectGlobalsToRuntimeSessions').mockResolvedValue({ updated: 1, skipped: [] });
+
+    await service.applyCompletedProjectGlobalResourceRequest('project-1', 'owner-1', {
+      id: 'work-item-1',
+      status: 'ACCEPTED',
+      goalId: 'goal-1',
+      inputPacket: {
+        resourceRequest: {
+          key: 'hackerone_api_token',
+          label: 'HackerOne API token',
+          value: 'new-h1-token',
+          isSecret: true,
+          category: 'hackerone',
+          required: true,
+        },
+      },
+    });
+
+    expect(agentWorkspaceClient.updateProjectGlobals).toHaveBeenCalledWith(
+      'project-1',
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: 'hackerone_api_token',
+          value: 'new-h1-token',
+          scope: 'project',
+          goalId: null,
+        }),
+      ]),
+      expect.objectContaining({
+        source: 'work-item-resource-request',
+      }),
+    );
+    expect(agentWorkspaceClient.updateProjectGlobals.mock.calls[0][1]).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: 'hackerone_api_token',
+          scope: 'goal',
+          goalId: 'goal-1',
+        }),
+      ]),
+    );
   });
 
   it('closes matching goal resource request items after a goal global is supplied', async () => {
@@ -5674,6 +5970,60 @@ describe('ProjectsService project globals', () => {
         value: 'totol+vimeo-a@example.com',
         scope: 'goal',
         goalId: 'goal-1',
+        required: true,
+        createTaskOnMissing: true,
+      },
+    ]);
+
+    expect(prisma.projectWorkItem.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ['resource-1'] } },
+      data: { status: 'ACCEPTED' },
+    });
+    expect(prisma.projectWorkItem.create).not.toHaveBeenCalled();
+  });
+
+  it('closes matching project resource request items even when the item belongs to a goal', async () => {
+    const prisma = {
+      project: {
+        findUnique: jest.fn().mockResolvedValue({ settings: {} }),
+      },
+      projectWorkItem: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 'resource-1',
+            goalId: 'goal-1',
+            status: 'READY',
+            inputPacket: {
+              resourceRequest: {
+                key: 'hackerone_api_token',
+                label: 'HackerOne API token',
+                category: 'hackerone',
+                isSecret: true,
+              },
+            },
+          },
+        ]),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        create: jest.fn(),
+      },
+    };
+    const service = new ProjectsService(
+      prisma as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { get: () => undefined } as never,
+      {} as never,
+    ) as any;
+
+    await service.syncProjectGlobalResourceTasks('project-1', 'owner-1', [
+      {
+        key: 'hackerone_api_token',
+        label: 'HackerOne API token',
+        value: 'configured-token',
+        isSecret: true,
+        scope: 'project',
         required: true,
         createTaskOnMissing: true,
       },
@@ -7312,9 +7662,11 @@ describe('ProjectsService runtime polling state', () => {
       expect(localService.reconnectAgentRuntime).toHaveBeenCalledWith('project-1', 'member-1', 'owner-1');
       expect(localService.agentRuntimeLauncher.inspect).toHaveBeenCalledTimes(2);
       expect(localService.sendAgentRuntimeMessage).toHaveBeenCalledWith('project-1', 'member-1', 'owner-1', {
-        message: config.message,
+        message: expect.stringContaining('Wake reason: resource request completed'),
         conversationId: 'poll-1',
       });
+      expect(localService.sendAgentRuntimeMessage.mock.calls[0][3].message).toContain(config.message);
+      expect(localService.sendAgentRuntimeMessage.mock.calls[0][3].message).toContain('fresh lead polling frontier review');
       expect(result).toEqual(expect.objectContaining({
         memberId: 'member-1',
         role: 'LEAD_AGENT',

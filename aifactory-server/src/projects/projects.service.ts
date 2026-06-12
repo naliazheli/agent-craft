@@ -257,6 +257,9 @@ type ProjectAgentRoleName = {
 const AGENT_DEPLOYMENT_PRICE_PER_DAY = 10;
 const DEFAULT_PROJECT_MAX_ACTIVE_AGENTS = 10;
 const PROJECT_MAX_ACTIVE_AGENTS_CAP = 50;
+const DEFAULT_PROJECT_MAX_ACTIVE_GOALS = 5;
+const PROJECT_MAX_ACTIVE_GOALS_CAP = 50;
+const PROJECT_ACTIVE_GOAL_STATUSES = ['IN_PROGRESS', 'BLOCKED'];
 const DEFAULT_AGENT_RUNTIME_CHAT_TIMEOUT_MS = 0;
 const DEFAULT_LOCAL_RUNNER_BRIDGE_TIMEOUT_MS = 0;
 const DEFAULT_WORK_ITEM_STATUS_DEFINITIONS: ProjectWorkItemStatusDefinition[] = [
@@ -908,8 +911,7 @@ export class ProjectsService {
       request.scope === 'goal' ||
       request.goalScope === true ||
       request.category === 'hackerone-goal' ||
-      (typeof request.goalId === 'string' && request.goalId.trim()) ||
-      Boolean(fallbackGoalId);
+      (typeof request.goalId === 'string' && request.goalId.trim());
     return {
       key,
       label: typeof request.label === 'string' && request.label.trim() ? request.label.trim() : key,
@@ -1089,7 +1091,7 @@ export class ProjectsService {
       project.settings && typeof project.settings === 'object' && !Array.isArray(project.settings)
         ? project.settings as Record<string, any>
         : {};
-    const requestScope = request.scope === 'goal' || workItem.goalId || workItem.featureId ? 'goal' : 'project';
+    const requestScope = request.scope === 'goal' ? 'goal' : 'project';
     let requestGoalId = requestScope === 'goal' ? request.goalId || workItem.goalId || null : null;
     if (requestScope === 'goal' && !requestGoalId && workItem.featureId) {
       const feature = await this.prisma.projectFeature.findFirst({
@@ -1126,7 +1128,7 @@ export class ProjectsService {
       projectGlobals: this.globalsForStoredSettings(nextGlobals),
     };
 
-    await this.persistProjectGlobalSecrets(projectId, [nextGlobal], {
+    await this.persistProjectGlobalSecrets(projectId, nextGlobals, {
       updatedByUserId: userId,
       workItemId: workItem.id,
       source: 'work-item-resource-request',
@@ -1332,11 +1334,38 @@ export class ProjectsService {
     return normalized;
   }
 
+  private normalizeProjectMaxActiveGoals(value: any, options: { strict?: boolean } = {}) {
+    if (value === undefined || value === null || value === '') {
+      return DEFAULT_PROJECT_MAX_ACTIVE_GOALS;
+    }
+    const numeric = Number(value);
+    const normalized = Math.floor(numeric);
+    if (!Number.isFinite(numeric) || normalized < 1 || normalized > PROJECT_MAX_ACTIVE_GOALS_CAP) {
+      if (options.strict) {
+        throw new BadRequestException(
+          `Max active goals must be between 1 and ${PROJECT_MAX_ACTIVE_GOALS_CAP}`,
+        );
+      }
+      return Math.min(
+        Math.max(Number.isFinite(numeric) ? normalized : DEFAULT_PROJECT_MAX_ACTIVE_GOALS, 1),
+        PROJECT_MAX_ACTIVE_GOALS_CAP,
+      );
+    }
+    return normalized;
+  }
+
   private projectMaxActiveAgentsFromSettings(settings?: any) {
     if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
       return DEFAULT_PROJECT_MAX_ACTIVE_AGENTS;
     }
     return this.normalizeProjectMaxActiveAgents(settings.maxActiveAgents);
+  }
+
+  private projectMaxActiveGoalsFromSettings(settings?: any) {
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+      return DEFAULT_PROJECT_MAX_ACTIVE_GOALS;
+    }
+    return this.normalizeProjectMaxActiveGoals(settings.maxActiveGoals);
   }
 
   private applyProjectAgentLimitSetting(settings: any, options: { strict?: boolean } = {}) {
@@ -1345,7 +1374,32 @@ export class ProjectsService {
         ? settings as Record<string, any>
         : {};
     base.maxActiveAgents = this.normalizeProjectMaxActiveAgents(base.maxActiveAgents, options);
+    base.maxActiveGoals = this.normalizeProjectMaxActiveGoals(base.maxActiveGoals, options);
     return base;
+  }
+
+  private isActiveProjectGoalStatus(status: unknown) {
+    return PROJECT_ACTIVE_GOAL_STATUSES.includes(String(status || '').trim().toUpperCase());
+  }
+
+  private async ensureProjectActiveGoalCapacity(projectId: string, settings?: any, excludeGoalId?: string | null) {
+    const maxActiveGoals = this.projectMaxActiveGoalsFromSettings(settings);
+    if (!(this.prisma.projectGoal as any)?.count) {
+      return { activeGoalCount: 0, maxActiveGoals };
+    }
+    const activeGoalCount = await this.prisma.projectGoal.count({
+      where: {
+        projectId,
+        status: { in: PROJECT_ACTIVE_GOAL_STATUSES as any },
+        ...(excludeGoalId ? { id: { not: excludeGoalId } } : {}),
+      },
+    });
+    if (activeGoalCount >= maxActiveGoals) {
+      throw new BadRequestException(
+        `Project active goal limit reached (${activeGoalCount}/${maxActiveGoals}). Complete an active goal or move one back to OPEN before starting another active goal.`,
+      );
+    }
+    return { activeGoalCount, maxActiveGoals };
   }
 
   private async activeProjectAgentCount(projectId: string) {
@@ -1927,6 +1981,78 @@ export class ProjectsService {
     return true;
   }
 
+  private isHackerOneOpportunityResearchSettings(settings: any) {
+    return Boolean(
+      settings &&
+      typeof settings === 'object' &&
+      !Array.isArray(settings) &&
+      settings.projectTemplateId === 'hackerone-opportunity-research'
+    );
+  }
+
+  private isGenericHackerOneOpportunityDiscoveryGoal(input: {
+    title?: string | null;
+    description?: string | null;
+  }) {
+    const title = typeof input.title === 'string' ? input.title.toLowerCase() : '';
+    const description = typeof input.description === 'string' ? input.description.toLowerCase() : '';
+    const text = [title, description].filter(Boolean).join(' ');
+    const hasGenericDiscoveryTitle =
+      title.includes('hackerone opportunity discovery') &&
+      (
+        title.includes('ongoing') ||
+        title.includes('meta') ||
+        title.includes('target scouting') ||
+        title.includes('batch') ||
+        title.includes('generic')
+      );
+    if (hasGenericDiscoveryTitle) return true;
+
+    const hasSpecificProgramUrl = /https:\/\/hackerone\.com\/(?!opportunities(?:\/|$)|graphql\b)[a-z0-9_-]+(?:\?type=team)?/i.test(text);
+    if (hasSpecificProgramUrl) return false;
+
+    return (
+      (text.includes('hackerone opportunity discovery') || text.includes('opportunity-research')) &&
+      (
+        text.includes('opportunities/all') ||
+        text.includes('target scouting') ||
+        text.includes('meta-goal') ||
+        text.includes('ongoing hackerone opportunity discovery')
+      )
+    );
+  }
+
+  private allowsParallelHackerOneOpportunityDiscovery(inputPacket: any) {
+    if (!inputPacket || typeof inputPacket !== 'object' || Array.isArray(inputPacket)) return false;
+    const coordinator =
+      inputPacket.coordinator && typeof inputPacket.coordinator === 'object' && !Array.isArray(inputPacket.coordinator)
+        ? inputPacket.coordinator
+        : {};
+    return inputPacket.allowParallelOpportunityDiscovery === true || coordinator.allowParallelOpportunityDiscovery === true;
+  }
+
+  private async hasUnfinishedHackerOneTargetGoal(projectId: string) {
+    const goals = await this.prisma.projectGoal.findMany({
+      where: {
+        projectId,
+        status: { in: ['OPEN', 'IN_PROGRESS', 'BLOCKED'] as any },
+      },
+      select: { title: true, description: true },
+      take: 200,
+    });
+    return goals.some((goal: any) => !this.isGenericHackerOneOpportunityDiscoveryGoal(goal));
+  }
+
+  private async shouldBlockGenericHackerOneOpportunityDiscovery(
+    projectId: string,
+    settings: any,
+    inputPacket: any,
+  ) {
+    if (!this.isHackerOneOpportunityResearchSettings(settings)) return false;
+    if (this.allowsParallelHackerOneOpportunityDiscovery(inputPacket)) return false;
+    return this.hasUnfinishedHackerOneTargetGoal(projectId);
+  }
+
   private localRunnerTokenHash(token: string) {
     return createHash('sha256').update(token, 'utf8').digest('hex');
   }
@@ -2307,6 +2433,19 @@ export class ProjectsService {
 
   private nextAgentPollingRunAt(config: AgentRuntimePollingConfig, from: Date = new Date()) {
     return new Date(from.getTime() + config.intervalMinutes * 60 * 1000).toISOString();
+  }
+
+  private agentPollingMessage(config: AgentRuntimePollingConfig, options: { reason?: string | null } = {}) {
+    const baseMessage = String(config.message || DEFAULT_AGENT_POLLING_CONFIG.message).trim() || DEFAULT_AGENT_POLLING_CONFIG.message;
+    const reason = String(options.reason || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+    if (!reason) return baseMessage;
+    return [
+      baseMessage,
+      '',
+      `Wake reason: ${reason}`,
+      '',
+      'Run a fresh lead polling frontier review. Read coordination/lead.md if present, then coordination/lead-goal-ledger.jsonl, project globals, active goals, linked work item summaries, assignment/runtime state, recent events, targeted shared files, and targeted memory before deciding whether to skip unchanged goals, create missing work/resource/review items, create aggregation/synthesis/delivery work, or mark a goal done. Process only the highest-priority changed goals that fit this tick; append ledger records after inspected goals; update coordination/lead.md before stopping.',
+    ].join('\n');
   }
 
   private completedPollingState(
@@ -3996,16 +4135,17 @@ export class ProjectsService {
             '[Lead operating loop]',
             '1. On a fresh lead pass, or when current board context is missing or stale, source /opt/data/AGENT_WORKSPACE_RUNTIME.env; call POST $AGENT_WORKSPACE_BASE_URL/v1/runtimes/$AGENT_WORKSPACE_RUNTIME_ID/resume with Authorization: Bearer $AGENT_WORKSPACE_TOKEN and JSON {"projectId":"$AGENT_WORKSPACE_PROJECT_ID"}; then read board/work items/members from the resume boardSnapshot or GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/board. Do not use AIFACTORY_API_BASE_URL for resume or board reads.',
             'When the project has many goals or work items, avoid one huge all-items pass. Page through goals with GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/goals?includeClosed=false&limit=100, then for each active goal read only its linked work items with GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/work-items?goalId=<goalId>&includeClosed=true&limit=100&page=1. Read full item details lazily with GET /v1/projects/$AGENT_WORKSPACE_PROJECT_ID/work-items/{workItemId} only for the small set you may accept, revise, duplicate-check, or use to create the next item.',
-            'Maintain a durable lead goal ledger in project shared storage, preferably coordination/lead-goal-ledger.jsonl. At the start of a polling run, read the ledger if present. For each goal you inspect, compute a small status digest from goal id/status/updatedAt plus linked work-item ids/statuses/workTypes and open assignment statuses; after deciding, append or rewrite one JSON record with pollingRunId, timestamp, goalId, statusDigest, decision, nextAction, and any createdWorkItemIds. On later polling runs, skip a goal only when its latest ledger digest matches the current digest and there is no READY/NEEDS_REVISION/IN_REVIEW/ownerAction/resourceRequest work that needs lead attention. Write the ledger after each goal so a stopped runtime can resume without restarting the whole pass.',
+            'Maintain a durable lead workspace and lead goal ledger in project shared storage. Use coordination/lead.md for the human-readable frontier policy, polling cursor, next-goal queue, unresolved blockers, and project-level decisions. Use coordination/lead-goal-ledger.jsonl for per-goal machine checkpoints. At the start of a polling run, read lead.md if present, then read the ledger if present. For each goal you inspect, compute a small status digest from goal id/status/updatedAt plus linked work-item ids/statuses/workTypes and open assignment statuses; after deciding, append or rewrite one JSON record with pollingRunId, timestamp, goalId, topology, statusDigest, decision, nextAction, and any createdWorkItemIds. On later polling runs, skip a goal only when its latest ledger digest matches the current digest and there is no READY/NEEDS_REVISION/IN_REVIEW/ownerAction/resourceRequest work that needs lead attention. Write the ledger after each goal, and before stopping update coordination/lead.md with lastRunId, nextGoalCursor, unfinishedScanReason, skipped reasons, next-goal queue, unresolved blockers, and project-level decisions so a stopped runtime can resume without restarting the whole pass.',
+            'For every active goal, classify the completion topology before expanding work: DIRECT, SERIAL, FAN_OUT_FAN_IN, TOTAL_TO_PARTS, TOTAL_PARTS_TOTAL, or ITERATIVE_REVIEW. Use linked item summaries first, then read exact item details, shared files, and targeted memory only when they can change the decision. If accepted upstream work is sufficient and no aggregation deliverable is required, mark the goal DONE when no linked non-terminal work remains. If accepted upstream work is sufficient but the goal requires aggregation, create one aggregation/synthesis/delivery item that depends on accepted upstream items; require review when the acceptance bar or status flow requires it; mark DONE only after the accepted items or accepted aggregation artifact satisfy the goal acceptance bar and no linked non-terminal work remains.',
             '2. When the owner explicitly asks you to create a goal, use the host runtime helper POST $AIFACTORY_API_BASE_URL/projects/$AGENT_WORKSPACE_PROJECT_ID/goals/runtime-create with Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN and JSON {"title":"...","description":"..."}. To update a goal after accepted evidence/audit/report work, use PATCH $AIFACTORY_API_BASE_URL/projects/$AGENT_WORKSPACE_PROJECT_ID/goals/{goalId}/runtime-update with Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN and fields such as {"status":"IN_PROGRESS"} or {"status":"DONE"}. Runtime goal updates cannot cancel goals; create an owner action if cancellation is needed. Never mark DONE or create an owner goal-closure action while the same goal still has READY, ASSIGNED, IN_PROGRESS, IN_REVIEW, NEEDS_REVISION, or REPORT_READY security/planning/audit/report work; finish, accept, or cancel the linked work first. Do not call the user-JWT /goals endpoint with a runtime token, and do not guess /goals/{goalId}/status.',
             '3. If no item is ready, create or refine a dispatchable work item with scopeBrief, acceptanceCriteria, inputPacket, outputContract, dependencies, and any uploaded project file references in inputPacket.projectFiles. For new dispatchable work items, use the host runtime helper POST $AIFACTORY_API_BASE_URL/projects/$AGENT_WORKSPACE_PROJECT_ID/work-items/runtime-create with Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN so coordinator scheduling is triggered. acceptanceCriteria must be a single string; use newline-delimited numbered criteria instead of an array. outputContract must be a JSON object, never a plain string.',
-            '4. If project settings show workItemStatusFlow.coordinator.enabled is not false, your dispatch handoff is to create or refine the smallest READY/NEEDS_REVISION work item with the correct workType, dependencies, and outputContract, then stop and let the COORDINATOR launch/assign matching roles. Do not call runtime-dispatch while the coordinator is enabled unless the owner explicitly asks the lead to take over dispatch or the coordinator is disabled/unavailable; this prevents duplicate agents for the same item.',
-            '5. If the coordinator is disabled/unavailable or the owner explicitly asked the lead to dispatch, and a ready item needs execution with no suitable active worker runtime, prefer a local runner WORKER_AGENT when an operator can run Docker locally; use paid AWS cloud WORKER_AGENT for 1 day only when available runtime budget covers the daily commitment.',
-            `6. Manual dispatch fallback only: if AIFACTORY_API_BASE_URL and AIFACTORY_RUNTIME_TOKEN are present, launch and dispatch through POST $AIFACTORY_API_BASE_URL/projects/{projectId}/work-items/{workItemId}/assignments/runtime-dispatch with Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN. Use AIFACTORY_API_BASE_URL exactly as provided; do not prepend /api if it already ends with /api. Use JSON fields role, launchIfMissing, launchMode, objective, contextPacket, and forceLaunchNew when you need one fresh worker per parallel task; omit agentType unless the owner explicitly requested a different runtime; the host will use the role/template launch default first and only fall back to the platform sub-agent default when no role default exists. The host will use owner-visible model API configs, first trying the current/owner-preferred config and then fallbacks; if all model APIs fail, it creates an owner work item. Default launchMode for this lead runtime is ${defaultLaunchMode}; fallback default agentType is ${defaultAgentType}. local-runner is for production/operator Docker hosts such as agentcraft.work, local-codex is for a registered local Codex CLI worker, local-docker is for backend-local Docker, aws-agentcore/aws-ecs are paid cloud modes. Non-Hermes agent types must use local-docker, local-runner, or local-codex.`,
+            '4. If project settings show workItemStatusFlow.coordinator.enabled is not false, treat the COORDINATOR as the primary dispatcher: create or refine the smallest READY/NEEDS_REVISION work item with the correct workType, dependencies, and outputContract, then give the coordinator a chance to launch/assign the matching role. Use runtime-dispatch from the lead role as a fallback when coordinator dispatch is disabled, unavailable, stale, blocked by a failed assignment that you have reconciled, or has not produced an assignment and the project needs a new agent to keep moving.',
+            '5. If a ready item needs execution with no suitable active worker runtime and lead fallback dispatch is warranted, prefer local-docker/local-runner WORKER_AGENT in local AgentCraft; use paid AWS cloud WORKER_AGENT for 1 day only when available runtime budget covers the daily commitment.',
+            `6. Lead dispatch fallback: if AIFACTORY_API_BASE_URL and AIFACTORY_RUNTIME_TOKEN are present, launch and dispatch through POST $AIFACTORY_API_BASE_URL/projects/{projectId}/work-items/{workItemId}/assignments/runtime-dispatch with Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN. Use AIFACTORY_API_BASE_URL exactly as provided; do not prepend /api if it already ends with /api. Use JSON fields role, launchIfMissing, launchMode, objective, contextPacket, and forceLaunchNew when you need one fresh worker per parallel task; omit agentType unless the owner explicitly requested a different runtime; the host will use the role/template launch default first and only fall back to the platform sub-agent default when no role default exists. The host will use owner-visible model API configs, first trying the current/owner-preferred config and then fallbacks; if all model APIs fail, it creates an owner work item. Default launchMode for this lead runtime is ${defaultLaunchMode}; fallback default agentType is ${defaultAgentType}. local-runner is for production/operator Docker hosts such as agentcraft.work, local-codex is for a registered local Codex CLI worker, local-docker is for backend-local Docker, aws-agentcore/aws-ecs are paid cloud modes. Non-Hermes agent types must use local-docker, local-runner, or local-codex.`,
             'For HackerOne target work, use one fresh worker runtime per independent program/goal so prior target context cannot contaminate the next target. Use forceLaunchNew: true for independent target items. Only set contextPacket.sameGoalContinuation: true or contextPacket.allowWorkerReuse: true for a bounded revision or continuation on the same target/goal.',
             'Capacity rule: if runtime-dispatch returns a project active-agent capacity error, do not call a non-existent /agent-runtimes/{memberId}/stop endpoint. Reuse a suitable IDLE worker without forceLaunchNew only for non-HackerOne work or an explicit same-goal continuation; for HackerOne independent target worker items, wait for fresh-agent capacity or create/use an owner capacity/settings item. SECURITY_AUDITOR/REVIEW_AGENT feedback work may reuse same-role IDLE runtimes because the auditor must re-read the current handoff and evidence. STOPPED and ERROR runtime sessions do not count as active capacity.',
             'Dispatch timeout rule: if runtime-dispatch times out, disconnects, or returns an unreadable response, do not immediately retry with forceLaunchNew. First inspect assignments/runtime-state and the exact work item; if any open or recently completed assignment already exists for the same workItemId and role, treat dispatch as pending or idempotently successful, poll/wake that assignment, and create a separate work item only when you truly need another parallel agent.',
-            'Before runtime-dispatch, re-read the exact work item by id and verify it belongs to this project, is still READY, and is not CANCELLED, REJECTED, ACCEPTED, or superseded by a newer duplicate. Do not reuse ids from failed response parsing or items you just cancelled. Parse dispatch responses from assignment.id, assignment.status, assignment.assigneeUser, launchedRuntime, and idempotent; do not assume top-level assignmentId/runtimeId/status.',
+            'Before runtime-dispatch, re-read the exact work item by id and verify it belongs to this project, is still READY, and is not CANCELLED, REJECTED, ACCEPTED, or superseded by a newer duplicate. For every host or workspace URL, copy projectId, goalId, workItemId, and assignmentId exactly from the latest API object fields; never type ids from memory, truncate ids, invent UUID segments, or infer ids from titles. Do not reuse ids from failed response parsing or items you just cancelled. Parse dispatch responses from assignment.id, assignment.status, assignment.assigneeUser, launchedRuntime, and idempotent; do not assume top-level assignmentId/runtimeId/status.',
             '7. In manual dispatch fallback, dispatch the item to the chosen worker with launchIfMissing: true and a scoped task packet. The packet must include objective, workItem id/title, scopeBrief, acceptanceCriteria, inputPacket, outputContract, dependencies, projectFiles/read hints when files are referenced, and expected handoff. Never include actual credential, token, cookie, authorization header, API key, or account identifier values in contextPacket; include only resource keys/env var names and tell the assignee to read saved globals or runtime env. Automated agent work items should be unowned until dispatched; set ownerId only for human owner resource, approval, or decision items. Do not create a WORKER_AGENT assignment to the lead member or owner account itself for automated work.',
             'For HackerOne target goals, do not pre-create broad target-account/API-token resource requests just because a goal may eventually need authenticated testing. First create a narrow unauthenticated/passive Phase 1 SECURITY_TEST worker item for resource inventory and hypothesis confirmation, then leave it for the COORDINATOR unless the coordinator is disabled. Create owner resource-request work items only after a worker handoff names stable minimum keys, or when the program policy makes even Phase 1 impossible without that resource.',
             'For owner-visible confirmations, approvals, or external manual steps that are not secret values, create an owner action item instead of a fake resource: workType INTEGRATION, status READY, current goalId, high priority, and inputPacket.ownerAction with stable key, label, type, category, required, and prompt. Use resourceRequest only for values that must become project globals.',
@@ -4287,6 +4427,61 @@ export class ProjectsService {
     const configured = this.configService.get<string>('HERMES_AGENT_LOCAL_RUNNER_BRIDGE_TIMEOUT_MS');
     const numeric = configured ? Number(configured) : DEFAULT_LOCAL_RUNNER_BRIDGE_TIMEOUT_MS;
     return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
+  }
+
+  private agentRuntimeProgressHeartbeatMs() {
+    const configured =
+      this.configService.get<string>('HERMES_AGENT_RUNTIME_PROGRESS_HEARTBEAT_MS') ||
+      this.configService.get<string>('AGENTCRAFT_RUNTIME_PROGRESS_HEARTBEAT_MS');
+    const numeric = configured ? Number(configured) : 8000;
+    return Number.isFinite(numeric) && numeric > 0 ? Math.max(1000, numeric) : 8000;
+  }
+
+  private formatElapsedRuntimeTime(ms: number) {
+    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+  }
+
+  private runtimeProgressLabel(session: AgentRuntimeSession) {
+    const provider = String(session.provider || '').trim().toLowerCase();
+    const agentType = String(session.agentType || 'agent').trim().toLowerCase().replace(/_/g, '-') || 'agent';
+    if (provider === 'local-codex') return 'Local Codex';
+    if (provider === 'local-runner') return agentType === 'pi' ? 'Local runner Pi agent' : 'Local runner';
+    if (provider === 'local-docker') return agentType === 'pi' ? 'Local Docker Pi agent' : `Local Docker ${agentType} agent`;
+    if (provider === 'aws-agentcore') return agentType === 'agent' ? 'AgentCore runtime' : `AgentCore ${agentType} agent`;
+    if (provider === 'aws-ecs') return agentType === 'agent' ? 'ECS runtime' : `ECS ${agentType} agent`;
+    return agentType === 'agent' ? 'Runtime' : `${agentType} agent`;
+  }
+
+  private describeRuntimeProgressActivity(
+    session: AgentRuntimeSession,
+    requestId: string,
+    startedAtMs: number,
+  ) {
+    const elapsed = this.formatElapsedRuntimeTime(Date.now() - startedAtMs);
+    const bridgeRequest = session.localRunnerBridge?.requests?.find((request) => request.id === requestId);
+    const bridgeStatusText = this.sanitizeLocalRunnerStatusText(bridgeRequest?.statusText);
+    if (bridgeStatusText && !/^thinking$/i.test(bridgeStatusText)) {
+      return `${bridgeStatusText} (${elapsed} elapsed)`;
+    }
+
+    const activity = String(session.currentActivity || '').trim();
+    const canExtendActivity =
+      activity &&
+      !/^thinking$/i.test(activity) &&
+      !/^streaming response/i.test(activity) &&
+      !/^reading context and responding to:/i.test(activity) &&
+      !/\belapsed\)$/i.test(activity);
+    if (canExtendActivity) {
+      return `${activity} (${elapsed} elapsed)`;
+    }
+
+    const verb = this.isQueuedLocalRuntimeProvider(session.provider)
+      ? 'is processing the message'
+      : 'is still working';
+    return `${this.runtimeProgressLabel(session)} ${verb} (${elapsed} elapsed)`;
   }
 
   private sleep(ms: number) {
@@ -5411,6 +5606,7 @@ export class ProjectsService {
 
     await this.syncProjectCapabilityBundles(created.projectId, storedSettings);
     await this.ensureTemplateProjectFileFolders(created.projectId, template.projectFileFolders || []);
+    await this.ensureProjectLeadWorkspaceFile(created.projectId);
     await this.ensureTemplateAutoMembers(created.projectId, userId, template.roles || []);
 
     if (effectiveGlobals.length) {
@@ -5540,6 +5736,7 @@ export class ProjectsService {
       await this.agentWorkspaceClient.updateProject(existing.id, { settings: nextSettings }).catch(() => null);
       await this.syncProjectCapabilityBundles(existing.id, nextSettings);
       await this.ensureTemplateProjectFileFolders(existing.id, template.projectFileFolders || []);
+      await this.ensureProjectLeadWorkspaceFile(existing.id);
       await this.ensureTemplateAutoMembers(existing.id, userId, template.roles || []);
       return {
         reused: true,
@@ -6295,6 +6492,64 @@ export class ProjectsService {
         this.logger.warn(`Failed to create project file folder "${folder}" for ${projectId}: ${(err as Error).message}`);
       });
     }
+  }
+
+  private leadWorkspaceInitialContent() {
+    return [
+      '# Lead Workspace',
+      '',
+      'This file is the Lead Agent human-readable workspace. It is a dashboard and checkpoint, not the source of truth.',
+      'Goal, work item, assignment, review, resource, file, and memory truth still comes from the workspace and host APIs.',
+      '',
+      '## Current Frontier Policy',
+      '- Max goals per polling tick: 5',
+      '- Priority order: lead-attention items, changed digest, blocked goals, oldest unchecked',
+      '',
+      '## Polling Cursor',
+      '- lastRunId:',
+      '- nextGoalCursor:',
+      '- unfinishedScanReason:',
+      '',
+      '## Active Goal Queue',
+      '| goalId | topology | lastDigest | leadAttention | nextAction |',
+      '|---|---|---|---|---|',
+      '',
+      '## Project-Level Decisions',
+      '-',
+      '',
+      '## Open Risks / Owner Gates',
+      '-',
+      '',
+    ].join('\n');
+  }
+
+  private async ensureProjectLeadWorkspaceFile(projectId: string) {
+    const client = this.agentWorkspaceClient as any;
+    if (!client?.writeProjectFile) return;
+
+    if (client.createProjectFolder) {
+      await client.createProjectFolder(projectId, 'coordination').catch((err: any) => {
+        this.logger.warn(`Failed to create lead coordination folder for ${projectId}: ${err?.message || err}`);
+      });
+    }
+
+    if (client.readProjectFile) {
+      const existing = await client.readProjectFile(projectId, 'coordination/lead.md', 'text').catch(() => null);
+      const content = typeof existing?.content === 'string'
+        ? existing.content
+        : typeof existing?.text === 'string'
+          ? existing.text
+          : '';
+      if (content.trim()) return;
+    }
+
+    await client.writeProjectFile(projectId, {
+      path: 'coordination/lead.md',
+      content: this.leadWorkspaceInitialContent(),
+      contentType: 'text/markdown; charset=utf-8',
+    }).catch((err: any) => {
+      this.logger.warn(`Failed to initialize lead workspace file for ${projectId}: ${err?.message || err}`);
+    });
   }
 
   async listProjects(
@@ -8663,6 +8918,25 @@ export class ProjectsService {
         skipped.push({ workItemId: item.id, reason: 'HAS_OPEN_ASSIGNMENT' });
         continue;
       }
+      const isBlockedGenericHackerOneDiscovery =
+        String(item.workType || '').toUpperCase() === 'OPPORTUNITY_DISCOVERY' &&
+        this.isHackerOneOpportunityDiscoveryWorkItem({
+          title: item.title,
+          description: item.description,
+          scopeBrief: item.scopeBrief,
+          acceptanceCriteria: item.acceptanceCriteria,
+          inputPacket: item.inputPacket,
+          outputContract: item.outputContract,
+        }) &&
+        await this.shouldBlockGenericHackerOneOpportunityDiscovery(projectId, project.settings, item.inputPacket);
+      if (isBlockedGenericHackerOneDiscovery) {
+        await logBlocked(
+          `item ${item.title || item.id} is generic HackerOne opportunity discovery, but unfinished target goals exist; advance existing target goals first.`,
+          { reason: 'GENERIC_DISCOVERY_BLOCKED_BY_TARGET_GOAL' },
+          item,
+        );
+        continue;
+      }
       if (await this.planningItemHasActiveSiblingWork(projectId, item, statusFlow)) {
         skipped.push({ workItemId: item.id, reason: 'GOAL_ALREADY_HAS_ACTIVE_WORK' });
         continue;
@@ -10980,6 +11254,22 @@ export class ProjectsService {
       throw new BadRequestException('Goal title is required');
     }
     const description = typeof dto?.description === 'string' ? dto.description.trim() : dto?.description;
+    if (
+      this.isHackerOneOpportunityResearchSettings((project as any)?.settings) &&
+      this.isGenericHackerOneOpportunityDiscoveryGoal({ title, description })
+    ) {
+      const unfinishedGoalCount = await this.prisma.projectGoal.count({
+        where: {
+          projectId,
+          status: { in: ['OPEN', 'IN_PROGRESS', 'BLOCKED'] as any },
+        },
+      });
+      if (unfinishedGoalCount > 0) {
+        throw new BadRequestException(
+          'HackerOne generic opportunity discovery goals are not created while unfinished goals exist; advance existing goals first.',
+        );
+      }
+    }
     const programUrl =
       typeof description === 'string'
         ? description.match(/https:\/\/hackerone\.com\/[A-Za-z0-9_-]+(?:\?type=team)?/i)?.[0]
@@ -11059,6 +11349,17 @@ export class ProjectsService {
         throw new BadRequestException(
           'Runtime goal updates cannot mark a goal DONE while linked non-terminal work items remain; finish or cancel the linked work first.',
         );
+      }
+    }
+    if (dto.status !== undefined && this.isActiveProjectGoalStatus(dto.status)) {
+      const existingGoal = (this.prisma.projectGoal as any)?.findFirst
+        ? await this.prisma.projectGoal.findFirst({
+            where: { id: goalId, projectId },
+            select: { status: true },
+          })
+        : null;
+      if (!this.isActiveProjectGoalStatus(existingGoal?.status)) {
+        await this.ensureProjectActiveGoalCapacity(projectId, project?.settings, goalId);
       }
     }
 
@@ -13318,7 +13619,7 @@ export class ProjectsService {
       titleLocked: true,
     });
     const messageResult = await this.sendAgentRuntimeMessage(projectId, member.id, userId, {
-      message: config.message,
+      message: this.agentPollingMessage(config),
       conversationId: conversationResult.conversation.id,
     });
     const latestSession = await this.latestRuntimeSessionForMember(member.id);
@@ -13542,6 +13843,18 @@ export class ProjectsService {
     let partialSession: AgentRuntimeSession = typingSession;
     let lastPartialWriteAt = 0;
     let lastPublishedPartialText = '';
+    const startedAtMs = (() => {
+      const rawStartedAt =
+        typingSession.activeRequestStartedAt ||
+        typingSession.lastMessageAt ||
+        streamingAssistantMessage.createdAt;
+      const parsed = Date.parse(rawStartedAt || '');
+      return Number.isFinite(parsed) ? parsed : Date.now();
+    })();
+    const progressHeartbeatMs = this.agentRuntimeProgressHeartbeatMs();
+    let runtimeProgressTimer: ReturnType<typeof setInterval> | null = null;
+    let lastRuntimeProgressWriteAt = 0;
+    let runtimeProgressStopped = false;
     const persistPartialResponse = async (text: string, force = false) => {
       if (!text.trim()) return;
       const now = Date.now();
@@ -13581,8 +13894,59 @@ export class ProjectsService {
         session: this.sanitizeRuntimeSession(partialSession),
       });
     };
+    const publishRuntimeProgressHeartbeat = async () => {
+      if (runtimeProgressStopped) return;
+      const nowMs = Date.now();
+      if (nowMs - lastRuntimeProgressWriteAt < progressHeartbeatMs - 250) return;
+      const latestSession = (await this.latestRuntimeSessionForMember(member.id).catch(() => null)) || partialSession;
+      if (runtimeProgressStopped) return;
+      if (!latestSession || latestSession.activeRequestId !== activeRequestId || latestSession.status !== 'TYPING') {
+        return;
+      }
+      const lastStreamAtMs = latestSession.lastStreamAt ? Date.parse(latestSession.lastStreamAt) : NaN;
+      if (Number.isFinite(lastStreamAtMs) && nowMs - lastStreamAtMs < progressHeartbeatMs) {
+        return;
+      }
+      const now = new Date(nowMs).toISOString();
+      const scopedUpdates = this.activeRequestScopedUpdates(latestSession, activeRequestId, {
+        status: 'TYPING',
+        activeRequestId,
+        activeRequestStartedAt:
+          latestSession.activeRequestStartedAt ||
+          partialSession.activeRequestStartedAt ||
+          typingSession.activeRequestStartedAt ||
+          typingSession.lastMessageAt ||
+          now,
+        activeRequestConversationId: requestConversationId || latestSession.activeRequestConversationId || null,
+        currentActivity: this.describeRuntimeProgressActivity(latestSession, activeRequestId, startedAtMs),
+        updatedAt: now,
+      });
+      if (!scopedUpdates.currentActivity) return;
+      if (runtimeProgressStopped) return;
+      partialSession = {
+        ...latestSession,
+        ...scopedUpdates,
+      };
+      lastRuntimeProgressWriteAt = nowMs;
+      await this.writeRuntimeSession(member.id, partialSession);
+      this.publishAgentRuntimeSessionEvent(projectId, member.id, {
+        type: 'progress',
+        role: member.role,
+        requestId: activeRequestId,
+        message: partialSession.currentActivity || undefined,
+        session: this.sanitizeRuntimeSession(partialSession),
+      });
+    };
 
     try {
+      runtimeProgressTimer = setInterval(() => {
+        void publishRuntimeProgressHeartbeat().catch((error: any) => {
+          this.logger.warn(`Failed to publish runtime progress heartbeat for member ${member.id}: ${error?.message || error}`);
+        });
+      }, progressHeartbeatMs);
+      if (typeof (runtimeProgressTimer as any).unref === 'function') {
+        (runtimeProgressTimer as any).unref();
+      }
       const systemPrompt = await this.runtimeSystemPrompt(projectId, member.role, typingSession);
       const response = queuedLocalRuntime
         ? await this.sendMessageViaLocalRunnerBridge(
@@ -13613,6 +13977,7 @@ export class ProjectsService {
               onTextDelta: (text) => persistPartialResponse(text),
             }),
           );
+      runtimeProgressStopped = true;
       await this.ensureGitAutomationArtifacts(projectId, member.userId, typingSession, response.outputText || '');
       const nextStatus = this.responseNeedsConfirmation(response.outputText)
         ? 'WAITING_CONFIRMATION'
@@ -13657,10 +14022,11 @@ export class ProjectsService {
         .heartbeatRuntime(typingSession.runtimeId, typingSession.workspaceToken, {
           projectId,
           status: nextStatus === 'WAITING_CONFIRMATION' ? 'PAUSED' : 'IDLE',
-          message: nextStatus,
-        })
-        .catch(() => null);
+        message: nextStatus,
+      })
+      .catch(() => null);
     } catch (error: any) {
+      runtimeProgressStopped = true;
       this.logger.error(
         `Agent runtime message failed for member ${member.id}: ${error?.message || error}`,
         error?.stack,
@@ -13765,6 +14131,10 @@ export class ProjectsService {
         message: failedSession.lastError || undefined,
         session: this.sanitizeRuntimeSession(failedSession),
       });
+    } finally {
+      if (runtimeProgressTimer) {
+        clearInterval(runtimeProgressTimer);
+      }
     }
   }
 
@@ -14222,13 +14592,16 @@ export class ProjectsService {
       githubUrl: dto.githubUrl,
       settings: dto.settings,
     });
-    const strictMaxActiveAgents = Boolean(
+    const strictProjectScaleLimits = Boolean(
       dto.settings &&
       typeof dto.settings === 'object' &&
       !Array.isArray(dto.settings) &&
-      Object.prototype.hasOwnProperty.call(dto.settings, 'maxActiveAgents'),
+      (
+        Object.prototype.hasOwnProperty.call(dto.settings, 'maxActiveAgents') ||
+        Object.prototype.hasOwnProperty.call(dto.settings, 'maxActiveGoals')
+      ),
     );
-    this.applyProjectAgentLimitSetting(mergedSettings, { strict: strictMaxActiveAgents });
+    this.applyProjectAgentLimitSetting(mergedSettings, { strict: strictProjectScaleLimits });
     let requestedProjectGlobalsForPersistence: ProjectGlobalVariable[] | null = null;
     if (dto.settings && Object.prototype.hasOwnProperty.call(dto.settings, 'projectGlobals')) {
       const existingProjectGlobals = await this.resolveProjectGlobalVariables(projectId, existing?.settings);
@@ -14268,7 +14641,7 @@ export class ProjectsService {
       githubUrl: dto.githubUrl,
       settings: dto.settings,
     });
-    this.applyProjectAgentLimitSetting(storedSettings, { strict: strictMaxActiveAgents });
+    this.applyProjectAgentLimitSetting(storedSettings, { strict: strictProjectScaleLimits });
     if (resolvedProjectGlobals.length) {
       storedSettings.projectGlobals = this.globalsForStoredSettings(resolvedProjectGlobals);
     } else if (Array.isArray(storedSettings.projectGlobals) && !resolvedProjectGlobals.length) {
@@ -14312,8 +14685,14 @@ export class ProjectsService {
     });
 
     const projectGlobals = await this.resolveProjectGlobalVariables(projectId, project.settings);
+    const projectGlobalsForRuntime = resolvedProjectGlobals.length ? resolvedProjectGlobals : projectGlobals;
     if (managerProject.ownerId === userId) {
-      await this.syncProjectGlobalResourceTasks(projectId, managerProject.ownerId, projectGlobals);
+      await this.syncProjectGlobalResourceTasks(projectId, managerProject.ownerId, projectGlobalsForRuntime);
+      await this.syncProjectGlobalsToRuntimeSessions(projectId, projectGlobalsForRuntime).catch((error: any) => {
+        this.logger.warn(
+          `Failed to sync project globals after project settings update ${projectId}: ${error?.message || error}`,
+        );
+      });
     }
 
     return this.normalizeProject({
@@ -14371,6 +14750,7 @@ export class ProjectsService {
     });
 
     const snapshotSummary = {
+      settings: templateSettings,
       projectFileFolders,
       projectGlobals,
       roles,
@@ -14483,6 +14863,8 @@ export class ProjectsService {
   ) {
     const snapshot: Record<string, any> = {};
     for (const key of [
+      'maxActiveAgents',
+      'maxActiveGoals',
       'projectGlobals',
       'projectFileFolders',
       'projectTemplateRoles',
@@ -14912,6 +15294,17 @@ export class ProjectsService {
         'Use POST /:id/goals/:goalId/close to cancel a goal so dependent work is cleaned up.',
       );
     }
+    if (dto.status !== undefined && this.isActiveProjectGoalStatus(dto.status)) {
+      const existingGoal = (this.prisma.projectGoal as any)?.findFirst
+        ? await this.prisma.projectGoal.findFirst({
+            where: { id: goalId, projectId },
+            select: { status: true },
+          })
+        : null;
+      if (!this.isActiveProjectGoalStatus(existingGoal?.status)) {
+        await this.ensureProjectActiveGoalCapacity(projectId, project.settings, goalId);
+      }
+    }
 
     const data: Record<string, any> = {};
     if (dto.title !== undefined) data.title = dto.title;
@@ -15306,6 +15699,14 @@ export class ProjectsService {
       !this.isOwnerDirectedWorkItemPacket(inputPacket, goalId)
         ? undefined
         : dto.ownerId;
+    if (
+      isOpportunityDiscovery &&
+      await this.shouldBlockGenericHackerOneOpportunityDiscovery(projectId, project.settings, inputPacket)
+    ) {
+      throw new BadRequestException(
+        'HackerOne generic opportunity discovery work items are not created while unfinished target goals exist; advance existing target goals first.',
+      );
+    }
     if (
       !goalId &&
       isRuntimeCreated &&
@@ -16747,7 +17148,7 @@ export class ProjectsService {
       titleLocked: true,
     });
     const messageResult = await this.sendAgentRuntimeMessage(projectId, member.id, userId, {
-      message: config.message,
+      message: this.agentPollingMessage(config, { reason }),
       conversationId: conversationResult.conversation.id,
     });
     const latestSession = await this.latestRuntimeSessionForMember(member.id);

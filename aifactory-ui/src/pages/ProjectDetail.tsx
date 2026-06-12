@@ -123,11 +123,19 @@ const PROJECT_SIGNAL_STATUS_VARIANT: Record<string, 'default' | 'secondary' | 's
 
 const DEFAULT_PROJECT_MAX_ACTIVE_AGENTS = 10;
 const PROJECT_MAX_ACTIVE_AGENTS_CAP = 50;
+const DEFAULT_PROJECT_MAX_ACTIVE_GOALS = 5;
+const PROJECT_MAX_ACTIVE_GOALS_CAP = 50;
 
 function projectMaxActiveAgentsFromSettings(settings?: Record<string, unknown> | null) {
   const numeric = Number(settings?.maxActiveAgents);
   if (!Number.isFinite(numeric)) return DEFAULT_PROJECT_MAX_ACTIVE_AGENTS;
   return Math.min(Math.max(Math.floor(numeric), 1), PROJECT_MAX_ACTIVE_AGENTS_CAP);
+}
+
+function projectMaxActiveGoalsFromSettings(settings?: Record<string, unknown> | null) {
+  const numeric = Number(settings?.maxActiveGoals);
+  if (!Number.isFinite(numeric)) return DEFAULT_PROJECT_MAX_ACTIVE_GOALS;
+  return Math.min(Math.max(Math.floor(numeric), 1), PROJECT_MAX_ACTIVE_GOALS_CAP);
 }
 
 const PROJECT_DETAIL_TOUR_BASE_STEPS: GuidedTourStep[] = [
@@ -360,7 +368,7 @@ const MEMORY_TYPE_OPTIONS = ['DECISION', 'CONSTRAINT', 'FACT', 'RISK', 'OPEN_QUE
 const ARTIFACT_TYPE_OPTIONS = ['HANDOFF', 'SPEC', 'REPORT', 'PATCH', 'PR_LINK', 'TEST_RESULT', 'DECISION_NOTE'];
 const REVIEWER_TYPE_OPTIONS = ['LEAD_AGENT', 'REVIEW_AGENT', 'HUMAN'];
 const REVIEW_STATUS_OPTIONS = ['PENDING', 'APPROVED', 'CHANGES_REQUESTED', 'REJECTED'];
-type ProjectGoalOption = { id: string; title: string };
+type ProjectGoalOption = { id: string; title: string; status?: string };
 type ProjectFeatureOption = {
   id: string;
   title: string;
@@ -432,6 +440,80 @@ function collapseRuntimeText(text: string, charLimit = AGENT_MESSAGE_COLLAPSE_CH
   const lastBreak = Math.max(clipped.lastIndexOf('\n'), clipped.lastIndexOf(' '));
   const end = lastBreak > Math.floor(charLimit * 0.72) ? lastBreak : charLimit;
   return `${text.slice(0, end).trimEnd()}\n...`;
+}
+
+function ExpandableLineClampText({
+  text,
+  className = '',
+}: {
+  text: string;
+  className?: string;
+}) {
+  const measureRef = useRef<HTMLParagraphElement | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [canToggle, setCanToggle] = useState(false);
+
+  useEffect(() => {
+    setExpanded(false);
+  }, [text]);
+
+  useEffect(() => {
+    const element = measureRef.current;
+    if (!element || typeof window === 'undefined') return;
+
+    let frameId = 0;
+    const measure = () => {
+      const current = measureRef.current;
+      if (!current) return;
+
+      const nextCanToggle = current.scrollHeight > current.clientHeight + 1;
+      setCanToggle(nextCanToggle);
+      if (!nextCanToggle) {
+        setExpanded(false);
+      }
+    };
+    const scheduleMeasure = () => {
+      window.cancelAnimationFrame(frameId);
+      frameId = window.requestAnimationFrame(measure);
+    };
+
+    scheduleMeasure();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(scheduleMeasure);
+    observer?.observe(element);
+    window.addEventListener('resize', scheduleMeasure);
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      observer?.disconnect();
+      window.removeEventListener('resize', scheduleMeasure);
+    };
+  }, [text]);
+
+  return (
+    <div className="relative min-w-0">
+      <p className={`${expanded ? '' : 'line-clamp-2'} ${className}`}>
+        {text}
+      </p>
+      <p
+        ref={measureRef}
+        aria-hidden="true"
+        className={`pointer-events-none invisible absolute inset-x-0 top-0 line-clamp-2 ${className}`}
+      >
+        {text}
+      </p>
+      {canToggle ? (
+        <button
+          type="button"
+          className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          {expanded ? 'Show less' : 'Show more'}
+          <ChevronDown className={`h-3.5 w-3.5 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+        </button>
+      ) : null}
+    </div>
+  );
 }
 
 const AGENT_RUNTIME_STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'success' | 'warning' | 'destructive'> = {
@@ -2219,6 +2301,7 @@ export function ProjectDetail() {
     budgetAmount: '',
     budgetCurrency: 'AIC',
     maxActiveAgents: String(DEFAULT_PROJECT_MAX_ACTIVE_AGENTS),
+    maxActiveGoals: String(DEFAULT_PROJECT_MAX_ACTIVE_GOALS),
     projectGlobals: [] as ProjectGlobalVariable[],
   });
   const [goalGlobalsModalGoal, setGoalGlobalsModalGoal] = useState<ProjectGoalOption | null>(null);
@@ -2647,6 +2730,7 @@ export function ProjectDetail() {
       budgetAmount: String(project.budgetAmount ?? 0),
       budgetCurrency: project.budgetCurrency || 'AIC',
       maxActiveAgents: String(projectMaxActiveAgentsFromSettings(project.settings as Record<string, unknown> | null)),
+      maxActiveGoals: String(projectMaxActiveGoalsFromSettings(project.settings as Record<string, unknown> | null)),
       projectGlobals: Array.isArray(project.projectGlobals)
         ? project.projectGlobals.filter(isProjectScopedProjectGlobal)
         : [],
@@ -2777,6 +2861,17 @@ export function ProjectDetail() {
     () => activeMembers.filter((member) => member.user.role === 'AI_AGENT' || member.role.endsWith('_AGENT')).length,
     [activeMembers],
   );
+  const activeGoalCount = useMemo(
+    () =>
+      ((project?.goals || []) as ProjectGoalOption[]).filter((goal) =>
+        ['IN_PROGRESS', 'BLOCKED'].includes(String(goal.status || '').toUpperCase()),
+      ).length,
+    [project?.goals],
+  );
+  const maxActiveAgents = projectSettingsForm.maxActiveAgents || String(DEFAULT_PROJECT_MAX_ACTIVE_AGENTS);
+  const maxActiveGoals = projectSettingsForm.maxActiveGoals || String(DEFAULT_PROJECT_MAX_ACTIVE_GOALS);
+  const maxActiveAgentsNumber = Number(maxActiveAgents) || DEFAULT_PROJECT_MAX_ACTIVE_AGENTS;
+  const maxActiveGoalsNumber = Number(maxActiveGoals) || DEFAULT_PROJECT_MAX_ACTIVE_GOALS;
 
   useEffect(() => {
     setSelectedEventGraphNodeId('');
@@ -3987,7 +4082,6 @@ export function ProjectDetail() {
     if (!activity || /^streaming response/i.test(activity)) return [];
     if (/^reading context and responding to:/i.test(activity)) return [];
     if (/^reconnecting\.\.\./i.test(activity)) return [activity, 'Thinking'];
-    if (/^(local codex|local runner) is processing/i.test(activity)) return ['Thinking'];
     return [activity];
   }, [selectedAgentActivity, selectedAgentIsTyping]);
   const selectedAgentNeedsLocalRunner = Boolean(
@@ -5697,6 +5791,9 @@ export function ProjectDetail() {
           maxActiveAgents: projectSettingsForm.maxActiveAgents.trim()
             ? Number(projectSettingsForm.maxActiveAgents)
             : DEFAULT_PROJECT_MAX_ACTIVE_AGENTS,
+          maxActiveGoals: projectSettingsForm.maxActiveGoals.trim()
+            ? Number(projectSettingsForm.maxActiveGoals)
+            : DEFAULT_PROJECT_MAX_ACTIVE_GOALS,
           ...(canEditProjectGlobals
             ? {
                 projectGlobals: projectSettingsForm.projectGlobals
@@ -5943,6 +6040,19 @@ export function ProjectDetail() {
     setActiveProjectSection('work');
     setWorkItemsView('detail');
     navigate({ pathname: location.pathname, search: `?${params.toString()}` });
+  };
+
+  const handleHomeWorkItemPanelClick = (event: React.MouseEvent<HTMLElement>, workItemId: string) => {
+    if (event.defaultPrevented) return;
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const interactiveTarget = target.closest(
+      'a, button, input, select, textarea, label, summary, [role="button"], [role="link"], [contenteditable="true"]',
+    );
+    const selection = typeof window === 'undefined' ? '' : window.getSelection()?.toString() || '';
+    if (interactiveTarget || selection) return;
+
+    handleOpenWorkItemFromHome(workItemId);
   };
 
   const openWorkItemDetail = (workItemId: string) => {
@@ -6851,7 +6961,9 @@ export function ProjectDetail() {
             ),
           );
           if (event.type === 'progress') {
-            setAgentMessageResponse('Streaming response...');
+            setAgentMessageResponse(event.message || eventSession.currentActivity || 'Agent is still working...');
+          } else if (event.type === 'session' && (event.message || eventSession.currentActivity)) {
+            setAgentMessageResponse(event.message || eventSession.currentActivity || '');
           } else if (event.type === 'complete') {
             setAgentMessageResponse('Response complete.');
           } else if (event.type === 'error' || event.type === 'cancelled') {
@@ -7781,6 +7893,66 @@ export function ProjectDetail() {
             </div>
           </CardHeader>
           <CardContent className="space-y-6">
+            <form
+              onSubmit={handleUpdateProjectSettings}
+              className="rounded-lg border bg-muted/10 p-4"
+            >
+              <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <Settings2 className="h-4 w-4 text-primary" />
+                    <h2 className="font-semibold">Capacity</h2>
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    Active agents and active goals currently running in this project.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Badge variant={activeAgentCount >= maxActiveAgentsNumber ? 'warning' : 'secondary'}>
+                    Agents {activeAgentCount}/{maxActiveAgents}
+                  </Badge>
+                  <Badge variant={activeGoalCount >= maxActiveGoalsNumber ? 'warning' : 'secondary'}>
+                    Goals {activeGoalCount}/{maxActiveGoals}
+                  </Badge>
+                </div>
+              </div>
+              <div className="grid gap-3 md:grid-cols-[1fr_1fr_auto] md:items-end">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Max Active Agents</label>
+                  <input
+                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                    type="number"
+                    min="1"
+                    max={PROJECT_MAX_ACTIVE_AGENTS_CAP}
+                    step="1"
+                    value={projectSettingsForm.maxActiveAgents}
+                    disabled={!canManageProject || savingProjectSettings}
+                    onChange={(e) => setProjectSettingsForm((prev) => ({ ...prev, maxActiveAgents: e.target.value }))}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Max Active Goals</label>
+                  <input
+                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                    type="number"
+                    min="1"
+                    max={PROJECT_MAX_ACTIVE_GOALS_CAP}
+                    step="1"
+                    value={projectSettingsForm.maxActiveGoals}
+                    disabled={!canManageProject || savingProjectSettings}
+                    onChange={(e) => setProjectSettingsForm((prev) => ({ ...prev, maxActiveGoals: e.target.value }))}
+                  />
+                </div>
+                <Button
+                  type="submit"
+                  variant="secondary"
+                  disabled={!canManageProject || savingProjectSettings}
+                >
+                  {savingProjectSettings ? 'Saving...' : 'Save Limits'}
+                </Button>
+              </div>
+            </form>
+
             {(ownerResourceWorkItems.length || ownerActionWorkItems.length || ownerNonResourceWorkItems.length) ? (
               <div className="rounded-lg border border-primary/30 bg-primary/5 p-4">
                 <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
@@ -7809,7 +7981,8 @@ export function ProjectDetail() {
                     return (
                       <form
                         key={item.id}
-                        className="rounded-md border bg-background px-3 py-3"
+                        className="cursor-pointer rounded-md border bg-background px-3 py-3 transition-colors hover:border-primary/50"
+                        onClick={(event) => handleHomeWorkItemPanelClick(event, item.id)}
                         onSubmit={(e) => handleInlineResourceWorkItemSubmit(e, item, resourceRequest)}
                       >
                         <div className="grid gap-3 lg:grid-cols-[minmax(180px,260px)_1fr_auto] lg:items-end">
@@ -7818,9 +7991,10 @@ export function ProjectDetail() {
                               <p className="break-all font-mono text-sm font-semibold">{resourceRequest.key}</p>
                               <Badge variant="outline">{resourceRequest.isSecret ? 'secret' : 'plain'}</Badge>
                             </div>
-                            <p className="line-clamp-2 text-xs text-muted-foreground">
-                              {resourceRequest.description || item.description || `Fill ${resourceRequest.label} to create a project global.`}
-                            </p>
+                            <ExpandableLineClampText
+                              text={resourceRequest.description || item.description || `Fill ${resourceRequest.label} to create a project global.`}
+                              className="text-xs text-muted-foreground"
+                            />
                           </div>
                           <div className="space-y-1">
                             <label className="text-xs font-medium text-muted-foreground" htmlFor={`resource-request-${item.id}`}>
@@ -7865,14 +8039,21 @@ export function ProjectDetail() {
                     const isSavingThisAction = savingOwnerActionWorkItemId === item.id;
                     const detail = ownerAction.prompt || ownerAction.description || item.description || 'Confirm this owner step has been completed.';
                     return (
-                      <div key={item.id} className="rounded-md border bg-background px-3 py-3">
+                      <div
+                        key={item.id}
+                        className="cursor-pointer rounded-md border bg-background px-3 py-3 transition-colors hover:border-primary/50"
+                        onClick={(event) => handleHomeWorkItemPanelClick(event, item.id)}
+                      >
                         <div className="grid gap-3 lg:grid-cols-[minmax(180px,260px)_1fr_auto] lg:items-center">
                           <div className="min-w-0 space-y-1">
                             <div className="flex flex-wrap items-center gap-2">
                               <p className="break-all font-mono text-sm font-semibold">{ownerAction.key}</p>
                               {ownerAction.type ? <Badge variant="outline">{ownerAction.type}</Badge> : null}
                             </div>
-                            <p className="line-clamp-2 text-xs text-muted-foreground">{detail}</p>
+                            <ExpandableLineClampText
+                              text={detail}
+                              className="text-xs text-muted-foreground"
+                            />
                           </div>
                           <div className="min-w-0 space-y-1">
                             <p className="text-sm font-medium">{ownerAction.label}</p>
@@ -8500,7 +8681,7 @@ export function ProjectDetail() {
                       />
                     </div>
                   </div>
-                  <div className="grid gap-4 md:grid-cols-[1fr_180px]">
+                  <div className="grid gap-4 lg:grid-cols-[1fr_1fr_180px]">
                     <div className="space-y-2">
                       <label className="text-sm font-medium">Max Active Agents</label>
                       <input
@@ -8516,9 +8697,31 @@ export function ProjectDetail() {
                         Current active agents: {activeAgentCount}. Plan maximum: {PROJECT_MAX_ACTIVE_AGENTS_CAP}.
                       </p>
                     </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Max Active Goals</label>
+                      <input
+                        className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                        type="number"
+                        min="1"
+                        max={PROJECT_MAX_ACTIVE_GOALS_CAP}
+                        step="1"
+                        value={projectSettingsForm.maxActiveGoals}
+                        onChange={(e) => setProjectSettingsForm((prev) => ({ ...prev, maxActiveGoals: e.target.value }))}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Current active goals: {activeGoalCount}. Plan maximum: {PROJECT_MAX_ACTIVE_GOALS_CAP}.
+                      </p>
+                    </div>
                     <div className="flex items-end">
-                      <Badge variant={activeAgentCount >= Number(projectSettingsForm.maxActiveAgents || DEFAULT_PROJECT_MAX_ACTIVE_AGENTS) ? 'warning' : 'secondary'}>
-                        {activeAgentCount}/{projectSettingsForm.maxActiveAgents || DEFAULT_PROJECT_MAX_ACTIVE_AGENTS}
+                      <Badge
+                        className="whitespace-normal text-center leading-5"
+                        variant={
+                          activeAgentCount >= maxActiveAgentsNumber || activeGoalCount >= maxActiveGoalsNumber
+                            ? 'warning'
+                            : 'secondary'
+                        }
+                      >
+                        {activeAgentCount}/{maxActiveAgents} agents / {activeGoalCount}/{maxActiveGoals} goals
                       </Badge>
                     </div>
                   </div>
