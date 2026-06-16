@@ -1,4 +1,5 @@
 import { JwtService } from '@nestjs/jwt';
+import { resolveJwtSecret } from './jwt-secret';
 
 export type OAuthStateMode = 'login' | 'bind';
 
@@ -13,7 +14,7 @@ export interface OAuthStatePayload {
 
 export function signOAuthState(jwtService: JwtService, payload: OAuthStatePayload) {
   return jwtService.sign(payload, {
-    secret: process.env.JWT_SECRET || 'dev-secret',
+    secret: resolveJwtSecret(),
     expiresIn: '10m',
   });
 }
@@ -25,7 +26,7 @@ export function verifyOAuthState(jwtService: JwtService, state?: string): OAuthS
 
   try {
     return jwtService.verify(state, {
-      secret: process.env.JWT_SECRET || 'dev-secret',
+      secret: resolveJwtSecret(),
     }) as OAuthStatePayload;
   } catch {
     return null;

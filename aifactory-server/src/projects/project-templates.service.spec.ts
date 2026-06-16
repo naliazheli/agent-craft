@@ -124,16 +124,55 @@ describe('ProjectTemplatesService', () => {
 
     const template = await service.getTemplate('default');
 
+    expect(template.label).toBe('General Project Template');
+    expect(template.projectFileFolders).toEqual(expect.arrayContaining(['inputs', 'research', 'work', 'deliverables']));
+    expect(template.roleLaunchProfiles).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: 'LEAD_AGENT', launchMode: 'local-docker', agentType: 'pi' }),
+        expect.objectContaining({ role: 'WORKER_AGENT', launchMode: 'local-docker', agentType: 'pi' }),
+        expect.objectContaining({ role: 'INTEGRATOR_AGENT', launchMode: 'local-docker', agentType: 'pi' }),
+      ]),
+    );
     expect(template.roles.map((entry) => entry.role)).toEqual(
       expect.arrayContaining(['COORDINATOR', 'LEAD_AGENT', 'WORKER_AGENT', 'REVIEW_AGENT']),
     );
     expect(template.workItemStatusFlow?.coordinator).toEqual(
-      expect.objectContaining({ enabled: true, maxDispatchesPerTick: 3 }),
+      expect.objectContaining({ enabled: true, maxDispatchesPerTick: 3, launchMode: 'local-docker', agentType: 'pi' }),
     );
     expect(template.workItemStatusFlow?.dispatchRules).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ role: 'PLANNER_AGENT', workTypes: ['INTAKE', 'PLANNING'] }),
+        expect.objectContaining({ role: 'WORKER_AGENT', workTypes: expect.arrayContaining(['RESEARCH', 'ANALYSIS', 'WRITING']) }),
+        expect.objectContaining({ role: 'INTEGRATOR_AGENT', workTypes: expect.arrayContaining(['AGGREGATION', 'SYNTHESIS', 'DELIVERY']) }),
         expect.objectContaining({ role: 'REVIEW_AGENT', statuses: ['IN_REVIEW'] }),
+        expect.objectContaining({ role: 'WORKER_AGENT', statuses: ['READY', 'NEEDS_REVISION'] }),
+      ]),
+    );
+  });
+
+  it('ships the previous default as the code project template', async () => {
+    const service = new ProjectTemplatesService({
+      get: (key: string) =>
+        key === 'AGENT_WORKSPACE_PROJECT_TEMPLATES_PATH'
+          ? resolve(process.cwd(), '..', 'agent-workspace', 'project-templates')
+          : undefined,
+    } as never);
+
+    const template = await service.getTemplate('code');
+
+    expect(template.id).toBe('code');
+    expect(template.label).toBe('Code Project Template');
+    expect(template.roles.map((entry) => entry.role)).toEqual(
+      expect.arrayContaining(['COORDINATOR', 'LEAD_AGENT', 'PLANNER_AGENT', 'WORKER_AGENT', 'SECURITY_AUDITOR', 'INTEGRATOR_AGENT']),
+    );
+    expect(template.workItemStatusFlow?.coordinator).toEqual(
+      expect.objectContaining({ enabled: true, launchMode: 'local-docker', agentType: 'pi' }),
+    );
+    expect(template.workItemStatusFlow?.dispatchRules).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: 'PLANNER_AGENT', workTypes: ['INTAKE', 'PLANNING'] }),
+        expect.objectContaining({ role: 'SECURITY_AUDITOR', workTypes: ['SECURITY_REVIEW'] }),
+        expect.objectContaining({ role: 'INTEGRATOR_AGENT', workTypes: ['REPORT', 'INTEGRATION', 'DELIVERY'] }),
         expect.objectContaining({ role: 'WORKER_AGENT', statuses: ['READY', 'NEEDS_REVISION'] }),
       ]),
     );

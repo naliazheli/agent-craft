@@ -19,19 +19,33 @@ const contentTypes = {
   '.woff2': 'font/woff2',
 };
 
-function sendFile(res, filePath) {
+const immutableAssetHeaders = {
+  'Cache-Control': 'public, max-age=31536000, immutable',
+};
+
+const noStoreHeaders = {
+  'Cache-Control': 'no-store',
+};
+
+function sendFile(res, filePath, headers = {}) {
   const type = contentTypes[extname(filePath)] || 'application/octet-stream';
-  res.writeHead(200, { 'Content-Type': type });
+  res.writeHead(200, { 'Content-Type': type, ...headers });
   createReadStream(filePath).pipe(res);
 }
 
-async function resolvePath(urlPath) {
-  const safePath = normalize(decodeURIComponent(urlPath)).replace(/^(\.\.[/\\])+/, '');
-  let filePath = join(root, safePath);
+function notFound(res) {
+  res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', ...noStoreHeaders });
+  res.end('Not found');
+}
 
-  if (safePath === '/' || safePath === '.') {
-    filePath = join(root, 'index.html');
-  }
+function toSafePath(urlPath) {
+  return normalize(decodeURIComponent(urlPath))
+    .replace(/^(\.\.([/\\]|$))+/, '')
+    .replace(/^[/\\]+/, '') || 'index.html';
+}
+
+async function findFile(urlPath) {
+  const filePath = join(root, toSafePath(urlPath));
 
   try {
     const info = await stat(filePath);
@@ -42,10 +56,8 @@ async function resolvePath(urlPath) {
       return filePath;
     }
   } catch {
-    // Fall through to SPA entrypoint.
+    return null;
   }
-
-  return join(root, 'index.html');
 }
 
 const server = createServer(async (req, res) => {
@@ -58,8 +70,19 @@ const server = createServer(async (req, res) => {
   }
 
   try {
-    const filePath = await resolvePath(url.pathname);
-    sendFile(res, filePath);
+    const filePath = await findFile(url.pathname);
+    if (filePath) {
+      const headers = url.pathname.startsWith('/assets/') ? immutableAssetHeaders : noStoreHeaders;
+      sendFile(res, filePath, headers);
+      return;
+    }
+
+    if (url.pathname.startsWith('/assets/') || extname(url.pathname)) {
+      notFound(res);
+      return;
+    }
+
+    sendFile(res, join(root, 'index.html'), noStoreHeaders);
   } catch (error) {
     res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end(String(error));

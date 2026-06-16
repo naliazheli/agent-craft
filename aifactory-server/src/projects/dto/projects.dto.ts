@@ -70,7 +70,7 @@ export class CreateProjectDto {
   @IsString()
   projectTemplateId?: string;
 
-  @ApiPropertyOptional({ type: 'object' })
+  @ApiPropertyOptional({ type: 'object', additionalProperties: true })
   @IsOptional()
   settings?: any;
 }
@@ -134,13 +134,13 @@ export class UpdateProjectDto {
   @IsString()
   budgetCurrency?: string;
 
-  @ApiPropertyOptional({ type: 'object' })
+  @ApiPropertyOptional({ type: 'object', additionalProperties: true })
   @IsOptional()
   settings?: any;
 }
 
 export class UpdateProjectGoalGlobalsDto {
-  @ApiPropertyOptional({ type: 'array', items: { type: 'object' } })
+  @ApiPropertyOptional({ type: 'array', items: { type: 'object', additionalProperties: true } })
   @IsOptional()
   @IsArray()
   globals?: any[];
@@ -215,7 +215,7 @@ export class CreateProjectFeatureDto {
   @IsNumber()
   sortOrder?: number;
 
-  @ApiPropertyOptional({ type: 'object' })
+  @ApiPropertyOptional({ type: 'object', additionalProperties: true })
   @IsOptional()
   spec?: any;
 }
@@ -264,11 +264,11 @@ export class CreateProjectWorkItemDto {
   @IsString()
   acceptanceCriteria?: string;
 
-  @ApiPropertyOptional({ type: 'object' })
+  @ApiPropertyOptional({ type: 'object', additionalProperties: true })
   @IsOptional()
   inputPacket?: any;
 
-  @ApiPropertyOptional({ type: 'object' })
+  @ApiPropertyOptional({ type: 'object', additionalProperties: true })
   @IsOptional()
   outputContract?: any;
 
@@ -316,7 +316,7 @@ export class CreateProjectMemberDto {
   @IsString()
   role!: string;
 
-  @ApiPropertyOptional({ type: 'object' })
+  @ApiPropertyOptional({ type: 'object', additionalProperties: true })
   @IsOptional()
   permissions?: any;
 }
@@ -352,11 +352,11 @@ export class UpdateProjectWorkItemDto {
   @IsString()
   acceptanceCriteria?: string;
 
-  @ApiPropertyOptional({ type: 'object' })
+  @ApiPropertyOptional({ type: 'object', additionalProperties: true })
   @IsOptional()
   inputPacket?: any;
 
-  @ApiPropertyOptional({ type: 'object' })
+  @ApiPropertyOptional({ type: 'object', additionalProperties: true })
   @IsOptional()
   outputContract?: any;
 
@@ -425,6 +425,7 @@ export class CreateProjectAssignmentDto {
 
   @ApiPropertyOptional({
     type: 'object',
+    additionalProperties: true,
     description:
       'L3 TaskPacket snapshot handed to the assignee.',
   })
@@ -445,6 +446,7 @@ export class UpdateProjectAssignmentDto {
 
   @ApiPropertyOptional({
     type: 'object',
+    additionalProperties: true,
     description:
       'Updated L3 TaskPacket.',
   })
@@ -471,7 +473,7 @@ export class CreateProjectRunDto {
   @IsString()
   instruction?: string;
 
-  @ApiPropertyOptional({ type: 'object' })
+  @ApiPropertyOptional({ type: 'object', additionalProperties: true })
   @IsOptional()
   contextSnapshot?: any;
 
@@ -480,7 +482,7 @@ export class CreateProjectRunDto {
   @IsString()
   resultSummary?: string;
 
-  @ApiPropertyOptional({ type: 'object' })
+  @ApiPropertyOptional({ type: 'object', additionalProperties: true })
   @IsOptional()
   costInfo?: any;
 }
@@ -496,7 +498,7 @@ export class UpdateProjectRunDto {
   @IsString()
   instruction?: string;
 
-  @ApiPropertyOptional({ type: 'object' })
+  @ApiPropertyOptional({ type: 'object', additionalProperties: true })
   @IsOptional()
   contextSnapshot?: any;
 
@@ -505,7 +507,7 @@ export class UpdateProjectRunDto {
   @IsString()
   resultSummary?: string;
 
-  @ApiPropertyOptional({ type: 'object' })
+  @ApiPropertyOptional({ type: 'object', additionalProperties: true })
   @IsOptional()
   costInfo?: any;
 }
@@ -520,7 +522,7 @@ export class CreateProjectRunLogDto {
   @IsString()
   message!: string;
 
-  @ApiPropertyOptional({ type: 'object' })
+  @ApiPropertyOptional({ type: 'object', additionalProperties: true })
   @IsOptional()
   metadata?: any;
 }
@@ -560,7 +562,7 @@ export class CreateProjectArtifactDto {
   @IsUrl()
   url?: string;
 
-  @ApiPropertyOptional({ type: 'object' })
+  @ApiPropertyOptional({ type: 'object', additionalProperties: true })
   @IsOptional()
   metadata?: any;
 }
@@ -594,7 +596,7 @@ export class CreateProjectReviewDto {
   @IsString()
   reviewNote?: string;
 
-  @ApiPropertyOptional({ type: 'object' })
+  @ApiPropertyOptional({ type: 'object', additionalProperties: true })
   @IsOptional()
   checklistResult?: any;
 }
@@ -623,7 +625,7 @@ export class CreateProjectMemoryDto {
   @IsUUID()
   sourceArtifactId?: string;
 
-  @ApiPropertyOptional({ type: 'object' })
+  @ApiPropertyOptional({ type: 'object', additionalProperties: true })
   @IsOptional()
   metadata?: any;
 }
@@ -761,6 +763,7 @@ export class UpdateProjectRoleSkillsDto {
 
   @ApiPropertyOptional({
     type: 'object',
+    additionalProperties: true,
     description: 'Map of skill bundle ref to replacement SKILL.md content. Content is stored in project shared object storage.',
   })
   @IsOptional()
@@ -870,7 +873,7 @@ export class CreateProjectAgentProfileDto {
   @IsBoolean()
   enableSudo?: boolean;
 
-  @ApiPropertyOptional({ type: 'object' })
+  @ApiPropertyOptional({ type: 'object', additionalProperties: true })
   @IsOptional()
   settings?: any;
 }
@@ -927,7 +930,7 @@ export class UpdateProjectAgentProfileDto {
   @IsBoolean()
   enableSudo?: boolean;
 
-  @ApiPropertyOptional({ type: 'object' })
+  @ApiPropertyOptional({ type: 'object', additionalProperties: true })
   @IsOptional()
   settings?: any;
 }

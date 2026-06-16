@@ -83,6 +83,24 @@ describe('ProjectsService project names', () => {
     expect(prompt).toContain('Do not create ordinary INTEGRATION items for status reports');
   });
 
+  it('renders local agent Pi dispatch targets without the legacy provider key', () => {
+    const item = { id: 'work-1', title: 'Map internet rewards', workType: 'RESEARCH', status: 'READY' };
+
+    expect(
+      (service as any).coordinatorDispatchMessage(
+        item,
+        'WORKER_AGENT',
+        'local-codex',
+        'pi',
+        '当前有未被分配的 item {{title}}，通过 {{launchMode}}/{{agentType}} 拉起角色 {{role}}。',
+      ),
+    ).toBe('当前有未被分配的 item Map internet rewards，通过 local-agent/pi 拉起角色 WORKER_AGENT。');
+
+    expect(
+      (service as any).coordinatorDispatchMessage(item, 'WORKER_AGENT', 'local-codex', 'pi', null),
+    ).toBe('当前有未被分配的 item Map internet rewards，通过 local-agent/pi 拉起角色 WORKER_AGENT。');
+  });
+
   it('initializes the lead workspace file without relying on chat history', async () => {
     const agentWorkspaceClient = {
       createProjectFolder: jest.fn().mockResolvedValue({}),
@@ -199,6 +217,38 @@ describe('ProjectsService project names', () => {
     expect(prompt).not.toContain('nativePlugins');
     expect(prompt).not.toContain('pluginHooks');
     expect(prompt).not.toContain('mcpServers');
+  });
+
+  it('localizes worker runtime paths for local-codex sessions', async () => {
+    const prompt = await (service as any).runtimeSystemPrompt('project-1', 'WORKER_AGENT', {
+      name: 'Taylor',
+      role: 'WORKER_AGENT',
+      provider: 'local-codex',
+      skillBundleRefs: ['skill://agent-workspace', 'role-skill://agent-workspace-worker'],
+      capabilityBundleRefs: [
+        'capability://agent-workspace/core',
+        'capability://agent-workspace/role/worker-agent',
+      ],
+      capabilityBundles: [
+        {
+          ref: 'capability://agent-workspace/core',
+          requiredScopes: ['PROJECT_READ_BASIC', 'PROJECT_BOARD_READ'],
+          requiredProjectGlobals: [],
+        },
+      ],
+      runtimeFeatureSupport: {
+        supportedFeatures: ['filesystemSkills', 'skillPrompts', 'projectFiles', 'projectGlobals'],
+        unsupportedFeatures: [],
+      },
+      enableSudo: false,
+      projectGithubUrl: null,
+    });
+
+    expect(prompt).toContain('Do not read, print, or copy ./AGENT_WORKSPACE_RUNTIME.env');
+    expect(prompt).toContain('at ./skills/agent-workspace/scripts/project-files.sh');
+    expect(prompt).toContain('Do not create or use /opt/data or /opt/data/workspace');
+    expect(prompt).toContain('source ./AGENT_WORKSPACE_RUNTIME.env');
+    expect(prompt).not.toContain('Use /opt/data/workspace as the default persistent repo workspace');
   });
 
   it('gives lead runtimes explicit goal helper guidance and scope', async () => {
@@ -1383,6 +1433,110 @@ describe('ProjectsService project names', () => {
       ]),
     );
     expect(packet.workerStartChecklist.join('\n')).toContain('revisionFeedback');
+  });
+
+  it('includes dependency item summaries and accepted upstream files for aggregation assignments', async () => {
+    const prisma = {
+      projectWorkItem: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'agg-1',
+          title: 'Synthesize accepted parts',
+          description: 'Create final summary',
+          workType: 'AGGREGATION',
+          status: 'READY',
+          scopeBrief: 'Combine accepted upstream findings',
+          acceptanceCriteria: 'Final summary is grounded in accepted upstream files',
+          inputPacket: {
+            goalTopology: {
+              mode: 'FAN_OUT_FAN_IN',
+              needsAggregation: true,
+              acceptanceBar: 'Summarize accepted lane outputs',
+            },
+            acceptedUpstreamItems: [
+              { workItemId: 'part-a', outputPaths: ['work/goal-1/part-a.md'] },
+            ],
+          },
+          outputContract: { type: 'aggregation-output', sharedFiles: ['deliverables/goal-1/final-summary.md'] },
+          dependsOn: ['part-a', 'part-b'],
+          concurrencyMode: 'SINGLE',
+          priority: 1,
+          dueAt: null,
+          goal: { id: 'goal-1', title: 'Goal', description: 'Goal details', status: 'IN_PROGRESS' },
+          feature: null,
+        }),
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 'part-a',
+            title: 'Part A',
+            description: 'Accepted data collection slice',
+            workType: 'DATA_COLLECTION',
+            status: 'ACCEPTED',
+            scopeBrief: 'Collect data',
+            acceptanceCriteria: 'Data file exists',
+            inputPacket: {},
+            outputContract: { sharedFiles: ['work/goal-1/part-a.md'] },
+            dependsOn: [],
+            goalId: 'goal-1',
+            featureId: null,
+            priority: 1,
+            dueAt: null,
+            updatedAt: new Date('2026-06-10T08:00:00.000Z'),
+          },
+          {
+            id: 'part-b',
+            title: 'Part B',
+            description: 'Accepted risk review slice',
+            workType: 'RISK_REVIEW',
+            status: 'ACCEPTED',
+            scopeBrief: 'Review risks',
+            acceptanceCriteria: 'Risk file exists',
+            inputPacket: {},
+            outputContract: { sharedFiles: ['work/goal-1/part-b.md'] },
+            dependsOn: [],
+            goalId: 'goal-1',
+            featureId: null,
+            priority: 1,
+            dueAt: null,
+            updatedAt: new Date('2026-06-10T09:00:00.000Z'),
+          },
+        ]),
+      },
+    };
+    const runtimeService = new ProjectsService(
+      prisma as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { get: () => undefined } as never,
+      {} as never,
+    ) as any;
+    runtimeService.relevantMemoryRefsForAssignment = jest.fn().mockResolvedValue([]);
+
+    const packet = await runtimeService.buildAssignmentContextPacket('project-1', 'agg-1', {
+      role: 'WORKER_AGENT',
+      assigneeUserId: 'worker-user',
+    });
+
+    expect(packet.relatedWorkItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'part-a', title: 'Part A', description: 'Accepted data collection slice' }),
+        expect.objectContaining({ id: 'part-b', title: 'Part B', description: 'Accepted risk review slice' }),
+      ]),
+    );
+    expect(packet.acceptedUpstreamItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ workItemId: 'part-a', title: 'Part A', outputPaths: ['work/goal-1/part-a.md'] }),
+        expect.objectContaining({ workItemId: 'part-b', title: 'Part B', outputPaths: ['work/goal-1/part-b.md'] }),
+      ]),
+    );
+    expect(packet.projectFiles).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: 'work/goal-1/part-a.md', source: 'acceptedUpstreamItem:part-a' }),
+        expect.objectContaining({ path: 'work/goal-1/part-b.md', source: 'acceptedUpstreamItem:part-b' }),
+      ]),
+    );
+    expect(packet.workerStartChecklist.join('\n')).toContain('relatedWorkItems');
   });
 
   it('can force a fresh launched sub-agent even when an idle worker exists', async () => {
@@ -3125,6 +3279,129 @@ describe('ProjectsService project names', () => {
     runtimeService.scheduleCoordinatorTick = jest.fn();
 
     await runtimeService.updateAssignment('project-1', 'work-1', 'assignment-1', 'worker-user', {
+      status: 'COMPLETED',
+    });
+
+    expect(prisma.projectWorkItem.update).not.toHaveBeenCalled();
+    expect(runtimeService.scheduleCoordinatorTick).not.toHaveBeenCalled();
+  });
+
+  it('does not move a review work item back to active when a reviewer starts', async () => {
+    const settings = {
+      workItemStatusFlow: {
+        activeStatus: 'IN_PROGRESS',
+        terminalStatuses: ['ACCEPTED', 'REJECTED', 'CANCELLED'],
+        coordinator: { enabled: true },
+      },
+    };
+    const prisma = {
+      projectAssignment: {
+        update: jest.fn().mockResolvedValue({
+          id: 'review-assignment-1',
+          role: 'REVIEW_AGENT',
+          status: 'ACTIVE',
+          assigneeUser: null,
+          assignedByUser: null,
+        }),
+      },
+      projectWorkItem: {
+        findUnique: jest
+          .fn()
+          .mockResolvedValueOnce({
+            status: 'IN_REVIEW',
+            title: 'Review target',
+            workType: 'RESEARCH',
+            goalId: 'goal-1',
+            featureId: null,
+          }),
+        update: jest.fn(),
+      },
+    };
+    const runtimeService = new ProjectsService(
+      prisma as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { get: () => undefined } as never,
+      {} as never,
+    ) as any;
+    runtimeService.ensureProjectAccess = jest.fn().mockResolvedValue({
+      ownerId: 'owner-user',
+      leadAgentUserId: 'lead-user',
+      settings,
+    });
+    runtimeService.ensureProjectAssignment = jest.fn().mockResolvedValue({
+      id: 'review-assignment-1',
+      role: 'REVIEW_AGENT',
+      assigneeUserId: 'reviewer-user',
+      startedAt: null,
+    });
+    runtimeService.scheduleCoordinatorTick = jest.fn();
+
+    await runtimeService.updateAssignment('project-1', 'work-1', 'review-assignment-1', 'reviewer-user', {
+      status: 'ACTIVE',
+    });
+
+    expect(prisma.projectWorkItem.update).not.toHaveBeenCalled();
+    expect(runtimeService.scheduleCoordinatorTick).not.toHaveBeenCalled();
+  });
+
+  it('does not overwrite review decisions when a reviewer assignment completes', async () => {
+    const settings = {
+      workItemStatusFlow: {
+        assignmentCompletedStatus: 'IN_REVIEW',
+        reviewChangesRequestedStatus: 'NEEDS_REVISION',
+        terminalStatuses: ['ACCEPTED', 'REJECTED', 'CANCELLED'],
+        coordinator: { enabled: true },
+      },
+    };
+    const prisma = {
+      projectAssignment: {
+        update: jest.fn().mockResolvedValue({
+          id: 'review-assignment-1',
+          role: 'REVIEW_AGENT',
+          status: 'COMPLETED',
+          assigneeUser: null,
+          assignedByUser: null,
+        }),
+      },
+      projectWorkItem: {
+        findUnique: jest
+          .fn()
+          .mockResolvedValueOnce({
+            status: 'NEEDS_REVISION',
+            title: 'Review target',
+            workType: 'RESEARCH',
+            goalId: 'goal-1',
+            featureId: null,
+          }),
+        update: jest.fn(),
+      },
+    };
+    const runtimeService = new ProjectsService(
+      prisma as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { get: () => undefined } as never,
+      {} as never,
+    ) as any;
+    runtimeService.ensureProjectAccess = jest.fn().mockResolvedValue({
+      ownerId: 'owner-user',
+      leadAgentUserId: 'lead-user',
+      settings,
+    });
+    runtimeService.ensureProjectAssignment = jest.fn().mockResolvedValue({
+      id: 'review-assignment-1',
+      role: 'REVIEW_AGENT',
+      assigneeUserId: 'reviewer-user',
+      startedAt: new Date('2026-06-04T00:00:00.000Z'),
+    });
+    runtimeService.scheduleCoordinatorTick = jest.fn();
+
+    await runtimeService.updateAssignment('project-1', 'work-1', 'review-assignment-1', 'reviewer-user', {
       status: 'COMPLETED',
     });
 
@@ -6457,7 +6734,7 @@ describe('ProjectsService runtime orphan detection', () => {
       activeRequestId: 'request-1',
       activeRequestConversationId: 'conversation-1',
       status: 'TYPING',
-      currentActivity: 'Waiting for local Codex',
+      currentActivity: 'Waiting for Local Agent + Pi',
       localRunnerBridge: {
         requests: [
           {
@@ -6565,6 +6842,39 @@ describe('ProjectsService runtime orphan detection', () => {
           activeRequestId: null,
           status: 'IDLE',
           lastError: 'Agent response timed out before completion.',
+          localRunnerBridge: { requests: [] },
+        }),
+        'local-codex',
+      ),
+    ).toBe(true);
+  });
+
+  it('does not let a local-codex Pi session without model config block account runner claims', () => {
+    const service = createService();
+
+    expect(
+      service.isLocalRuntimeClaimable(
+        session({
+          provider: 'local-codex',
+          agentType: 'pi',
+          apiBaseUrl: '',
+          activeRequestId: null,
+          status: 'ERROR',
+          localRunnerBridge: { requests: [] },
+        }),
+        'local-codex',
+      ),
+    ).toBe(false);
+
+    expect(
+      service.isLocalRuntimeClaimable(
+        session({
+          provider: 'local-codex',
+          agentType: 'pi',
+          apiBaseUrl: '',
+          llm: { configId: 'config-1' },
+          activeRequestId: null,
+          status: 'IDLE',
           localRunnerBridge: { requests: [] },
         }),
         'local-codex',
@@ -6691,6 +7001,7 @@ describe('ProjectsService runtime orphan detection', () => {
     const recovered = service.recoverPersistedRuntimeSession(
       session({
         provider: 'local-codex',
+        agentType: 'pi',
         apiBaseUrl: 'local-codex://runtime-1',
         activeRequestId: 'request-1',
         status: 'TYPING',
@@ -6701,12 +7012,12 @@ describe('ProjectsService runtime orphan detection', () => {
 
     expect(recovered.status).toBe('ERROR');
     expect(recovered.activeRequestId).toBeNull();
-    expect(recovered.lastError).toBe('Local Codex message request was lost before the runner could complete it. Please retry the message.');
+    expect(recovered.lastError).toBe('Local Agent + Pi message request was lost before the runner could complete it. Please retry the message.');
     expect(recovered.messageHistory).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           role: 'system',
-          content: 'Local Codex message request was lost before the runner could complete it. Please retry the message.',
+          content: 'Local Agent + Pi message request was lost before the runner could complete it. Please retry the message.',
           status: 'ERROR',
         }),
       ]),
@@ -6725,7 +7036,7 @@ describe('ProjectsService runtime orphan detection', () => {
         status: 'STARTING',
         activeRequestId: null,
         lastMessageAt: requestCreatedAt,
-        lastError: 'local Codex heartbeat stopped before the active message completed.',
+        lastError: 'local agent heartbeat stopped before the active message completed.',
         messageHistory: [
           {
             id: 'user-1',
@@ -6737,7 +7048,7 @@ describe('ProjectsService runtime orphan detection', () => {
           {
             id: 'assistant-1',
             role: 'assistant',
-            content: 'Local Codex picked up the AgentCraft request.',
+            content: 'Local Agent + Pi picked up the AgentCraft request.',
             createdAt: requestCreatedAt,
             status: 'ERROR',
           },
@@ -6953,7 +7264,7 @@ describe('ProjectsService runtime orphan detection', () => {
         status: 'WAITING_LOCAL_CODEX',
         activeRequestId: 'request-1',
         activeRequestConversationId: null,
-        lastError: 'local Codex heartbeat stopped before the active message completed.',
+        lastError: 'local agent heartbeat stopped before the active message completed.',
         localRunnerBridge: {
           requests: [
             {
@@ -6974,12 +7285,12 @@ describe('ProjectsService runtime orphan detection', () => {
 
     expect(recovered.status).toBe('WAITING_LOCAL_CODEX');
     expect(recovered.activeRequestId).toBeNull();
-    expect(recovered.lastError).toBe('local Codex heartbeat stopped before the active message completed.');
+    expect(recovered.lastError).toBe('local agent heartbeat stopped before the active message completed.');
     expect(recovered.messageHistory).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           role: 'system',
-          content: 'local Codex heartbeat stopped before the active message completed.',
+          content: 'local agent heartbeat stopped before the active message completed.',
           status: 'ERROR',
         }),
       ]),

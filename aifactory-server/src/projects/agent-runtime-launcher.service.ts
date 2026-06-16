@@ -381,8 +381,8 @@ export class AgentRuntimeLauncherService {
       const image = this.defaultImage(agentType);
       images.push({ id: image, label: this.imageLabel(image), provider: 'local-docker', agentType });
       images.push({ id: image, label: `${this.imageLabel(image)} (local runner)`, provider: 'local-runner', agentType });
-      if (agentType === 'codex') {
-        images.push({ id: image, label: `${this.imageLabel(image)} (local Codex)`, provider: 'local-codex', agentType });
+      if (['codex', 'pi'].includes(agentType)) {
+        images.push({ id: image, label: `${this.imageLabel(image)} (local agent)`, provider: 'local-codex', agentType });
       }
     }
     const cloudImage = this.cloudImage();
@@ -951,7 +951,7 @@ export class AgentRuntimeLauncherService {
     }
 
     if (session.provider === 'local-runner' || session.provider === 'local-codex') {
-      const queuedRuntime = session.provider === 'local-codex' ? 'local Codex' : 'local runner';
+      const queuedRuntime = session.provider === 'local-codex' ? 'local agent runner' : 'local runner';
       const queuedScheme = session.provider === 'local-codex' ? 'local-codex://' : 'local-runner://';
       if (!session.apiBaseUrl || session.apiBaseUrl.startsWith(queuedScheme)) {
         const activeBridgeRequest = (session.localRunnerBridge?.requests || []).find((request) => {
@@ -1282,7 +1282,9 @@ export class AgentRuntimeLauncherService {
     const image = config.image || this.localRunnerImage(agentType);
     const apiKey = randomBytes(24).toString('hex');
     const containerName = this.containerName(config.projectId, config.role, config.runtimeId);
-    const job = await this.createLocalRunnerJob(launchConfig, image, containerName, apiKey);
+    const job = await this.createLocalRunnerJob(launchConfig, image, containerName, apiKey, {
+      piDirectModelApi: provider === 'local-codex',
+    });
 
     return {
       provider,
@@ -1317,7 +1319,7 @@ export class AgentRuntimeLauncherService {
       launchedAt: now,
       updatedAt: now,
       currentActivity: provider === 'local-codex'
-        ? `${config.role} ${this.agentTypeLabel(agentType)} is waiting for local Codex to claim the launch job`
+        ? `${config.role} ${this.agentTypeLabel(agentType)} is waiting for local agent runner to claim the launch job`
         : `${config.role} ${this.agentTypeLabel(agentType)} is waiting for a local runner to claim the launch job`,
       localRunnerJob: job,
       messageHistory: [
@@ -1326,11 +1328,11 @@ export class AgentRuntimeLauncherService {
           role: 'system',
           content: [
             provider === 'local-codex'
-              ? `${config.role} ${this.agentTypeLabel(agentType)} local Codex launch job created with ${config.skillBundleRefs.join(', ')}.`
+              ? `${config.role} ${this.agentTypeLabel(agentType)} local agent launch job created with ${config.skillBundleRefs.join(', ')}.`
               : `${config.role} ${this.agentTypeLabel(agentType)} local runner launch job created with ${config.skillBundleRefs.join(', ')}.`,
             config.agentDisplayName ? `Agent identity: your display name is ${config.agentDisplayName}.` : '',
             provider === 'local-codex'
-              ? 'Start agentcraft-local-codex-runner on a machine with Codex CLI to claim this runtime.'
+              ? 'Start agentcraft-local-codex-runner on a machine with Node.js to claim this runtime. Codex jobs use Codex CLI; Pi jobs use the Pi npm package.'
               : 'Start agentcraft-local-runner on a machine with Docker to claim this runtime.',
             config.rolePrompt ? `Initial role prompt: ${config.rolePrompt}` : '',
           ].filter(Boolean).join('\n\n'),
@@ -1345,6 +1347,7 @@ export class AgentRuntimeLauncherService {
     session: AgentRuntimeSession,
     context: AgentWorkspaceContextSync,
     llm: AgentRuntimeLaunchConfig['llm'],
+    options: { provider?: 'local-runner' | 'local-codex' } = {},
   ): Promise<AgentRuntimeLocalRunnerJob> {
     const agentType = this.normalizeAgentType(session.agentType);
     const image = session.image || this.localRunnerImage(agentType);
@@ -1382,6 +1385,9 @@ export class AgentRuntimeLauncherService {
       image,
       containerName,
       apiKey,
+      {
+        piDirectModelApi: options.provider === 'local-codex',
+      },
     );
   }
 
@@ -1531,7 +1537,10 @@ export class AgentRuntimeLauncherService {
       session.skillBundleRefs,
       session.role,
       session.projectSkillOverrides,
-      { progressive: this.shouldUseProgressiveSkillPrompt(session) },
+      {
+        progressive: this.shouldUseProgressiveSkillPrompt(session),
+        mountRoot: session.provider === 'local-codex' ? './skills' : undefined,
+      },
     );
     const pageConversationId = this.pageConversationId(session);
     return {
@@ -2459,7 +2468,7 @@ export class AgentRuntimeLauncherService {
     skillBundleRefs: string[],
     role?: string | null,
     projectSkillOverrides: AgentRuntimeProjectSkillOverride[] = [],
-    options: { progressive?: boolean } = {},
+    options: { progressive?: boolean; mountRoot?: string } = {},
   ) {
     const parts: string[] = [];
     const overridesByRef = this.projectSkillOverridesByRef(projectSkillOverrides);
@@ -2472,7 +2481,7 @@ export class AgentRuntimeLauncherService {
           ? this.projectSkillFileContent(override, 'SKILL.md') || ''
           : await this.loadSkillMarkdown(ref, role || undefined);
         if (options.progressive) {
-          parts.push(this.progressiveSkillPrompt(ref, name, content, override, role || undefined));
+          parts.push(this.progressiveSkillPrompt(ref, name, content, override, role || undefined, options.mountRoot));
           continue;
         }
         parts.push(
@@ -2494,10 +2503,12 @@ export class AgentRuntimeLauncherService {
     content: string,
     override?: AgentRuntimeProjectSkillOverride,
     role?: string,
+    mountRoot?: string,
   ) {
     const metadata = this.skillMarkdownMetadata(content);
-    const mountedDir = `/opt/data/skills/${name}`;
-    const scriptPaths = this.skillScriptPaths(ref, name, override, role);
+    const normalizedMountRoot = (mountRoot || '/opt/data/skills').replace(/\/+$/, '');
+    const mountedDir = `${normalizedMountRoot}/${name}`;
+    const scriptPaths = this.skillScriptPaths(ref, name, override, role, normalizedMountRoot);
     return [
       `[SYSTEM: The "${name}" skill is available for this agent runtime. Use progressive disclosure.]`,
       `Ref: ${ref}.`,
@@ -2535,6 +2546,7 @@ export class AgentRuntimeLauncherService {
     name: string,
     override?: AgentRuntimeProjectSkillOverride,
     role?: string,
+    mountRoot = '/opt/data/skills',
   ) {
     const relativePaths = new Set<string>();
     for (const file of override?.files || []) {
@@ -2564,7 +2576,8 @@ export class AgentRuntimeLauncherService {
         }
       }
     }
-    return [...relativePaths].sort().map((filePath) => `/opt/data/skills/${name}/${filePath}`);
+    const normalizedMountRoot = mountRoot.replace(/\/+$/, '');
+    return [...relativePaths].sort().map((filePath) => `${normalizedMountRoot}/${name}/${filePath}`);
   }
 
   async loadSkillMarkdown(ref: string, role?: string | null) {
@@ -2604,6 +2617,7 @@ export class AgentRuntimeLauncherService {
     image: string,
     containerName: string,
     apiKey: string,
+    options: { piDirectModelApi?: boolean } = {},
   ): Promise<AgentRuntimeLocalRunnerJob> {
     const agentType = this.normalizeAgentType(config.agentType);
     const capabilityBundleRefs = config.capabilityBundleRefs || [];
@@ -2684,7 +2698,7 @@ export class AgentRuntimeLauncherService {
       if (agentType === 'pi') {
         files.push({
           path: '.pi/agent/models.json',
-          content: this.piModelsConfigContents(config.llm),
+          content: this.piModelsConfigContents(config.llm, { directModelApi: Boolean(options.piDirectModelApi) }),
         });
         files.push({
           path: '.pi/agent/settings.json',
@@ -3103,9 +3117,11 @@ export class AgentRuntimeLauncherService {
     );
   }
 
-  private piModelsConfigContents(llm: AgentRuntimeLlmConfig) {
+  private piModelsConfigContents(llm: AgentRuntimeLlmConfig, options: { directModelApi?: boolean } = {}) {
     const isClaude = llm.apiType === 'claude';
-    const baseUrl = isClaude ? this.normalizeLlmBaseUrl(llm) : 'http://127.0.0.1:8642/v1';
+    const baseUrl = isClaude || options.directModelApi
+      ? this.normalizeLlmBaseUrl(llm)
+      : 'http://127.0.0.1:8642/v1';
     return JSON.stringify(
       {
         providers: {

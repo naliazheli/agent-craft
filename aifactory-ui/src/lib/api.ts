@@ -249,6 +249,9 @@ export interface ProjectWorkItem {
   inputPacket?: Record<string, unknown> | null;
   outputContract?: Record<string, unknown> | null;
   dependsOn?: string[] | null;
+  relatedItems?: ProjectWorkItemSummary[];
+  dependencyItems?: ProjectWorkItemSummary[];
+  acceptedUpstreamItems?: ProjectAcceptedUpstreamItemSummary[];
   createdAt: string;
   updatedAt: string;
   owner?: any;
@@ -264,6 +267,30 @@ export interface ProjectWorkItem {
     runs?: number;
     comments?: number;
   };
+}
+
+export interface ProjectWorkItemSummary {
+  id: string;
+  title: string;
+  description?: string | null;
+  workType?: string | null;
+  status?: string | null;
+  scopeBrief?: string | null;
+  acceptanceCriteria?: string | null;
+  goalId?: string | null;
+  featureId?: string | null;
+  dependsOn?: string[] | null;
+  priority?: number;
+  dueAt?: string | null;
+  updatedAt?: string | null;
+  outputContract?: Record<string, unknown> | null;
+  outputProjectFiles?: string[];
+}
+
+export interface ProjectAcceptedUpstreamItemSummary extends ProjectWorkItemSummary {
+  workItemId: string;
+  outputPaths?: string[];
+  source?: string | null;
 }
 
 export interface ProjectWorkItemListMeta {

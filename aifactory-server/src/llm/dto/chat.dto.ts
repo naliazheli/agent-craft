@@ -1,4 +1,4 @@
-import { IsString, IsArray, IsEnum, ValidateNested, IsOptional, IsNumber } from 'class-validator';
+import { IsString, IsArray, IsEnum, ValidateNested, IsOptional, IsNumber, IsUrl } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -26,6 +26,7 @@ export class LlmChatDto {
 
   @ApiProperty({ example: 'https://api.openai.com/v1' })
   @IsString()
+  @IsUrl({ require_protocol: true, protocols: ['https', 'http'] })
   apiUrl: string;
 
   @ApiProperty({ example: 'sk-...' })

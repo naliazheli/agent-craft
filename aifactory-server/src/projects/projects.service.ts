@@ -1640,6 +1640,160 @@ export class ProjectsService {
     return sanitized as T;
   }
 
+  private normalizeWorkItemIdList(value: unknown) {
+    if (!Array.isArray(value)) return [];
+    return [...new Set(
+      value
+        .map((item) => (typeof item === 'string' ? item.trim() : ''))
+        .filter((item) => item.length > 0),
+    )];
+  }
+
+  private normalizeProjectFilePathList(value: unknown) {
+    const candidates: unknown[] = [];
+    const collect = (entry: unknown) => {
+      if (!entry) return;
+      if (typeof entry === 'string') {
+        candidates.push(entry);
+        return;
+      }
+      if (typeof entry !== 'object' || Array.isArray(entry)) return;
+      const record = entry as Record<string, any>;
+      for (const key of ['path', 'projectFilePath', 'outputPath']) {
+        if (typeof record[key] === 'string') candidates.push(record[key]);
+      }
+    };
+    if (Array.isArray(value)) {
+      for (const entry of value) collect(entry);
+    } else {
+      collect(value);
+    }
+    return [...new Set(
+      candidates
+        .map((candidate) => this.normalizeProjectFileReference(candidate))
+        .filter((path): path is string => Boolean(path)),
+    )];
+  }
+
+  private summarizeRelatedWorkItem(item: any) {
+    const outputProjectFiles = this.collectOutputProjectFilePaths(item?.inputPacket, item?.outputContract, {});
+    return {
+      id: item.id,
+      title: item.title,
+      description: item.description ?? null,
+      workType: item.workType,
+      status: item.status,
+      scopeBrief: item.scopeBrief ?? null,
+      acceptanceCriteria: item.acceptanceCriteria ?? null,
+      goalId: item.goalId ?? null,
+      featureId: item.featureId ?? null,
+      dependsOn: Array.isArray(item.dependsOn) ? item.dependsOn : [],
+      priority: item.priority ?? 0,
+      dueAt: this.assignmentContextTimestamp(item.dueAt),
+      updatedAt: this.assignmentContextTimestamp(item.updatedAt),
+      outputContract: item.outputContract ?? null,
+      outputProjectFiles,
+    };
+  }
+
+  private async relatedWorkItemSummaries(projectId: string, dependsOn: unknown) {
+    const ids = this.normalizeWorkItemIdList(dependsOn);
+    if (!ids.length) return [];
+    const prismaAny = this.prisma as any;
+    if (!prismaAny.projectWorkItem?.findMany) return [];
+    const rows = await prismaAny.projectWorkItem.findMany({
+      where: { projectId, id: { in: ids } },
+      select: {
+        id: true,
+        title: true,
+        description: true,
+        workType: true,
+        status: true,
+        scopeBrief: true,
+        acceptanceCriteria: true,
+        inputPacket: true,
+        outputContract: true,
+        dependsOn: true,
+        goalId: true,
+        featureId: true,
+        priority: true,
+        dueAt: true,
+        updatedAt: true,
+      },
+    });
+    const byId = new Map((rows || []).map((row: any) => [row.id, this.summarizeRelatedWorkItem(row)]));
+    return ids.map((id) => byId.get(id)).filter(Boolean);
+  }
+
+  private acceptedUpstreamItemSummaries(inputPacket: unknown, relatedItems: any[]) {
+    const packet =
+      inputPacket && typeof inputPacket === 'object' && !Array.isArray(inputPacket)
+        ? inputPacket as Record<string, any>
+        : {};
+    const explicit = Array.isArray(packet.acceptedUpstreamItems) ? packet.acceptedUpstreamItems : [];
+    const relatedById = new Map(relatedItems.map((item) => [item.id, item]));
+    const seen = new Set<string>();
+    const summaries: any[] = [];
+    const pushSummary = (workItemId: string, raw: Record<string, any> = {}, related?: any) => {
+      const id = workItemId.trim();
+      if (!id || seen.has(id)) return;
+      const outputPaths = this.normalizeProjectFilePathList(
+        raw.outputPaths ?? raw.outputProjectFiles ?? raw.sharedFiles ?? raw.projectFiles,
+      );
+      seen.add(id);
+      summaries.push({
+        workItemId: id,
+        id,
+        title: related?.title ?? raw.title ?? null,
+        description: related?.description ?? raw.description ?? null,
+        workType: related?.workType ?? raw.workType ?? null,
+        status: related?.status ?? raw.status ?? null,
+        scopeBrief: related?.scopeBrief ?? raw.scopeBrief ?? null,
+        acceptanceCriteria: related?.acceptanceCriteria ?? raw.acceptanceCriteria ?? null,
+        outputPaths: outputPaths.length ? outputPaths : related?.outputProjectFiles ?? [],
+        outputProjectFiles: related?.outputProjectFiles?.length ? related.outputProjectFiles : outputPaths,
+        source: raw.source ?? (related ? 'dependsOn' : 'inputPacket.acceptedUpstreamItems'),
+      });
+    };
+
+    for (const entry of explicit) {
+      const raw = entry && typeof entry === 'object' && !Array.isArray(entry) ? entry as Record<string, any> : {};
+      const workItemId =
+        typeof entry === 'string'
+          ? entry
+          : typeof raw.workItemId === 'string'
+            ? raw.workItemId
+            : typeof raw.id === 'string'
+              ? raw.id
+              : '';
+      if (workItemId) pushSummary(workItemId, raw, relatedById.get(workItemId));
+    }
+
+    for (const related of relatedItems) {
+      if (String(related.status || '').toUpperCase() === 'ACCEPTED') {
+        pushSummary(related.id, {}, related);
+      }
+    }
+
+    return summaries;
+  }
+
+  private projectFileRefsFromAcceptedUpstreamItems(acceptedUpstreamItems: any[]) {
+    const refs: Array<{ path: string; mention: string; source: string; readHint: string }> = [];
+    for (const item of acceptedUpstreamItems || []) {
+      const outputPaths = this.normalizeProjectFilePathList(item.outputPaths ?? item.outputProjectFiles);
+      for (const path of outputPaths) {
+        refs.push({
+          path,
+          mention: `@${path}`,
+          source: `acceptedUpstreamItem:${item.workItemId || item.id || 'unknown'}`,
+          readHint: `Read with project-file-read ${path} or GET /v1/projects/{projectId}/files/read?path=${encodeURIComponent(path)}`,
+        });
+      }
+    }
+    return refs;
+  }
+
   private async ensureRuntimeDispatchRoleCapacity(projectId: string, settings: any, role: string) {
     const projectGlobals = await this.resolveProjectGlobalVariables(projectId, settings).catch(() => []);
     const maxParallelForRole = this.maxParallelFromProjectGlobals(projectGlobals, role);
@@ -2108,9 +2262,7 @@ export class ProjectsService {
           name:
             typeof presence.name === 'string' && presence.name.trim()
               ? presence.name.trim()
-              : presence.provider === 'local-codex'
-                ? 'Local Codex runner'
-                : 'Local Docker runner',
+              : this.queuedLocalRuntimeRunnerName(presence.provider),
           userId: presence.userId,
           tokenId: typeof presence.tokenId === 'string' ? presence.tokenId : null,
           startedAt: typeof presence.startedAt === 'string' ? presence.startedAt : presence.lastSeenAt,
@@ -3736,6 +3888,7 @@ export class ProjectsService {
   }
 
   private normalizeAgentRuntimeLaunchMode(value?: any): AgentRuntimeLaunchMode | null {
+    if (value === 'local-agent') return 'local-codex';
     return ['local-docker', 'local-runner', 'local-codex', 'aws-ecs', 'aws-agentcore'].includes(value)
       ? value as AgentRuntimeLaunchMode
       : null;
@@ -3789,12 +3942,37 @@ export class ProjectsService {
     return provider === 'local-runner' || provider === 'local-codex';
   }
 
+  private normalizedDisplayAgentType(agentType?: string | null) {
+    return String(agentType || 'agent').trim().toLowerCase().replace(/_/g, '-') || 'agent';
+  }
+
+  private displayLaunchMode(launchMode: AgentRuntimeLaunchMode) {
+    return launchMode === 'local-codex' ? 'local-agent' : launchMode;
+  }
+
+  private displayLaunchTarget(launchMode: AgentRuntimeLaunchMode, agentType?: string | null) {
+    return `${this.displayLaunchMode(launchMode)}/${this.normalizedDisplayAgentType(agentType)}`;
+  }
+
+  private queuedLocalRuntimeProviderLabel(provider: 'local-runner' | 'local-codex', agentType?: string | null) {
+    if (provider !== 'local-codex') return 'Local runner';
+    const normalizedAgentType = this.normalizedDisplayAgentType(agentType);
+    if (normalizedAgentType === 'pi' || normalizedAgentType === 'pi-agent') return 'Local Agent + Pi';
+    if (normalizedAgentType === 'codex') return 'Local Agent + Codex';
+    if (normalizedAgentType === 'claude-code') return 'Local Agent + Claude Code';
+    return 'Local agent';
+  }
+
+  private queuedLocalRuntimeRunnerName(provider: 'local-runner' | 'local-codex') {
+    return provider === 'local-codex' ? 'Local Agent runner' : 'Local Docker runner';
+  }
+
   private isLocalCliAgent(agentType?: string | null) {
     return ['codex', 'claude-code'].includes(String(agentType || '').trim());
   }
 
   private canLaunchWithoutModelConfig(launchMode: AgentRuntimeLaunchMode, agentType?: string | null) {
-    return launchMode === 'local-codex' || (['local-docker', 'local-runner'].includes(launchMode) && this.isLocalCliAgent(agentType));
+    return ['local-docker', 'local-runner', 'local-codex'].includes(launchMode) && this.isLocalCliAgent(agentType);
   }
 
   private defaultAgentRuntimeType(session?: AgentRuntimeSession | null) {
@@ -4081,6 +4259,14 @@ export class ProjectsService {
     const agentDisplayName = typeof session.agentDisplayName === 'string' && session.agentDisplayName.trim()
       ? session.agentDisplayName.trim()
       : '';
+    const isLocalCodexRuntime = session.provider === 'local-codex';
+    const runtimeContextPath = isLocalCodexRuntime ? './AGENT_WORKSPACE_CONTEXT.json' : '/opt/data/AGENT_WORKSPACE_CONTEXT.json';
+    const runtimeEnvPath = isLocalCodexRuntime ? './AGENT_WORKSPACE_RUNTIME.env' : '/opt/data/AGENT_WORKSPACE_RUNTIME.env';
+    const runtimeSkillsPath = isLocalCodexRuntime ? './skills' : '/opt/data/skills';
+    const localWorkspaceDescription = 'the current local runtime bundle directory';
+    const runtimeWorkspaceDir = isLocalCodexRuntime
+      ? localWorkspaceDescription
+      : session.repoWorkspaceDir || '/opt/data/workspace';
     return [
       agentDisplayName
         ? `Your agent name is ${agentDisplayName}. You are acting as ${role} inside agent-workspace project ${projectId}. Refer to yourself as ${agentDisplayName} when identity matters.`
@@ -4099,31 +4285,37 @@ export class ProjectsService {
       session.runtimeFeatureSupport
         ? `This runtime supports these portable capability surfaces: ${session.runtimeFeatureSupport.supportedFeatures.join(', ') || 'none'}.`
         : '',
-      'Runtime context is mounted at /opt/data/AGENT_WORKSPACE_CONTEXT.json and shell/API credentials are provided through environment variables plus /opt/data/AGENT_WORKSPACE_RUNTIME.env.',
-      'Do not read, print, or copy /opt/data/AGENT_WORKSPACE_RUNTIME.env. Source it inside bash commands when shell/API credentials are needed, then use the exported variables.',
+      `Runtime context is mounted at ${runtimeContextPath} and shell/API credentials are provided through environment variables plus ${runtimeEnvPath}.`,
+      `Do not read, print, or copy ${runtimeEnvPath}. Source it inside bash commands when shell/API credentials are needed, then use the exported variables.`,
       'API routing rule: runtime resume, inbox/board/work-items, project globals, project files, and project memory are agent-workspace reads/writes. Use $AGENT_WORKSPACE_BASE_URL/v1/... with Authorization: Bearer $AGENT_WORKSPACE_TOKEN for those. Do not call host $AIFACTORY_API_BASE_URL for runtime resume, board, work-items listing, globals, files, or memory.',
-      'For project shared files, prefer the mounted project-files.sh helpers. If calling HTTP directly, list files with GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/files?prefix=<path>&recursive=true&limit=100; read with /files/read?path=<path>; write with /files/write. There is no /files/list route.',
-      'When working on a specific work item, bind item-scoped project-file writes/uploads/deletes with the helper option --work-item <workItemId>. Direct agent-workspace writes may instead include X-AgentCraft-Work-Item-Id or a workItemId field. Do not write an active work item id into /opt/data/AGENT_WORKSPACE_RUNTIME.env, because the same runtime may process different items in different sessions.',
+      `For project shared files, prefer the mounted project-files.sh helpers at ${runtimeSkillsPath}/agent-workspace/scripts/project-files.sh. If calling HTTP directly, list files with GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/files?prefix=<path>&recursive=true&limit=100; read with /files/read?path=<path>; write with /files/write. There is no /files/list route.`,
+      `When working on a specific work item, bind item-scoped project-file writes/uploads/deletes with the helper option --work-item <workItemId>. Direct agent-workspace writes may instead include X-AgentCraft-Work-Item-Id or a workItemId field. Do not write an active work item id into ${runtimeEnvPath}, because the same runtime may process different items in different sessions.`,
       session.enableSudo
         ? 'This runtime was launched with passwordless sudo enabled. Prefer existing tools, mounted helper scripts, and user-space package managers first; use system package installation only when truly required for the task.'
         : 'Prefer mounted helper scripts, Node.js fetch, or python3 urllib.request for API calls; avoid installing system packages just to make routine HTTP requests.',
       'Lead runtimes may also receive AIFACTORY_API_BASE_URL and AIFACTORY_RUNTIME_TOKEN in the runtime env file. Use host API endpoints only for host-owned runtime helpers such as goal runtime-create/runtime-update, work-item runtime-create/update/runtime-comments, assignment runtime-update/claim/dispatch, runtime launch/dispatch, assignment runtime-state, and failed-runtime workspace recovery. AIFACTORY_API_BASE_URL is a complete API base and may already end with /api; append /projects/... directly and do not add another /api segment. Never call host /projects/... endpoints without Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN, and do not use owner UI routes such as GET /projects/{projectId}/work-items/{workItemId}/comments; runtimes must use GET /projects/{projectId}/work-items/{workItemId}/runtime-comments for work-item comments. Do not call owner-only goal routes such as PATCH /projects/{projectId}/goals/{goalId}, PATCH /goals/{goalId}/status, or guessed goal helper paths; use PATCH /projects/{projectId}/goals/{goalId}/runtime-update for OPEN/IN_PROGRESS/BLOCKED/DONE status updates.',
-      'Project-level resources and saved credentials are owned by agent-workspace, can be listed with GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/globals?includeValues=true using AGENT_WORKSPACE_TOKEN, and may also be exported in /opt/data/AGENT_WORKSPACE_RUNTIME.env as PROJECT_GLOBAL_* variables plus common aliases such as GITHUB_TOKEN when configured.',
+      `Project-level resources and saved credentials are owned by agent-workspace, can be listed with GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/globals?includeValues=true using AGENT_WORKSPACE_TOKEN, and may also be exported in ${runtimeEnvPath} as PROJECT_GLOBAL_* variables plus common aliases such as GITHUB_TOKEN when configured.`,
       'Durable project memory is owned by agent-workspace. Search it with GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/memories?q=... and write reusable DECISION/CONSTRAINT/FACT/RISK/OPEN_QUESTION/INTERFACE_CONTRACT entries with POST $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/memories when your runtime has MEMORY_WRITE.',
       'When requesting owner-controlled resources, do not infer a vendor, website, social network, API provider, platform-specific key set, or platform-specific skill from a generic resource key or generic task. Keep labels and descriptions neutral unless the owner explicitly named that platform.',
-      'Use /opt/data/workspace as the default persistent repo workspace inside the container unless the task explicitly says otherwise.',
-      'Use /opt/data/workspace for container-local deliverables only when the task does not name a project shared-file path. If the task, work item, outputContract, or role prompt names a project shared folder such as 待审核/, 待复审核/, 审核报告/, reports/, deliverables/, or asks for project-file-write/project files API output, write the file through project-file-write, POST /v1/projects/{projectId}/files/write, or POST /v1/projects/{projectId}/files/upload so it lands in durable project shared storage.',
-      'Verify deliverables in the same place they were requested: use ls/find/read only for /opt/data/workspace outputs, and use project-file-list/project-file-read or the project files API for project shared-file outputs. Do not mark an assignment complete or tell the owner a project shared-file deliverable exists until that shared path can be listed or read.',
+      isLocalCodexRuntime
+        ? `Use ${runtimeWorkspaceDir} as the default persistent local workspace. Do not create or use /opt/data or /opt/data/workspace; those are container-only paths for Docker/cloud runtimes.`
+        : `Use ${runtimeWorkspaceDir} as the default persistent repo workspace inside the container unless the task explicitly says otherwise.`,
+      isLocalCodexRuntime
+        ? 'Use the local bundle filesystem only for scratch work. If the task, work item, outputContract, or role prompt names a project shared folder such as 待审核/, 待复审核/, 审核报告/, reports/, deliverables/, or asks for project-file-write/project files API output, write the file through project-file-write, POST /v1/projects/{projectId}/files/write, or POST /v1/projects/{projectId}/files/upload so it lands in durable project shared storage.'
+        : 'Use /opt/data/workspace for container-local deliverables only when the task does not name a project shared-file path. If the task, work item, outputContract, or role prompt names a project shared folder such as 待审核/, 待复审核/, 审核报告/, reports/, deliverables/, or asks for project-file-write/project files API output, write the file through project-file-write, POST /v1/projects/{projectId}/files/write, or POST /v1/projects/{projectId}/files/upload so it lands in durable project shared storage.',
+      isLocalCodexRuntime
+        ? 'Verify deliverables in the same place they were requested: use local file reads only for scratch outputs in the current bundle, and use project-file-list/project-file-read or the project files API for project shared-file outputs. Do not mark an assignment complete or tell the owner a project shared-file deliverable exists until that shared path can be listed or read.'
+        : 'Verify deliverables in the same place they were requested: use ls/find/read only for /opt/data/workspace outputs, and use project-file-list/project-file-read or the project files API for project shared-file outputs. Do not mark an assignment complete or tell the owner a project shared-file deliverable exists until that shared path can be listed or read.',
       'For external HTTP/API calls, set command-level timeouts around 20 seconds plus narrow retries, so one slow third-party request cannot stall an otherwise long-lived runtime.',
       'For long-running work, keep each turn bounded. Produce a small reviewable handoff before the turn becomes too large or silent: write concise project shared artifacts, verify them, mark the assignment COMPLETED, and create a follow-up item for deeper exploration when needed.',
       session.projectGithubUrl
-        ? `The project GitHub repository is ${session.projectGithubUrl}. If code work is requested, prefer cloning or opening it inside ${session.repoWorkspaceDir || '/opt/data/workspace'}.`
-        : 'If code work is requested and the project GitHub URL is visible in the context or project read API, clone or open it inside /opt/data/workspace.',
+        ? `The project GitHub repository is ${session.projectGithubUrl}. If code work is requested, prefer cloning or opening it inside ${runtimeWorkspaceDir}.`
+        : `If code work is requested and the project GitHub URL is visible in the context or project read API, clone or open it inside ${runtimeWorkspaceDir}.`,
       'Do not use read_file output to recover workspaceToken, because secret values may be redacted in tool output.',
-      'Do not rely on a previously exported AGENT_WORKSPACE_TOKEN env var if it differs from /opt/data/AGENT_WORKSPACE_RUNTIME.env, because long-lived runtimes may refresh tokens between turns.',
+      `Do not rely on a previously exported AGENT_WORKSPACE_TOKEN env var if it differs from ${runtimeEnvPath}, because long-lived runtimes may refresh tokens between turns.`,
       'Respect the role authorization boundary. On a fresh conversation or before state-changing workspace actions, read inbox/resume context; for ordinary follow-up messages in the same conversation, reuse the already loaded context unless it is missing or stale.',
       role === 'WORKER_AGENT'
-        ? 'On a fresh worker turn, source /opt/data/AGENT_WORKSPACE_RUNTIME.env and call POST $AGENT_WORKSPACE_BASE_URL/v1/runtimes/$AGENT_WORKSPACE_RUNTIME_ID/resume with JSON {"projectId":"$AGENT_WORKSPACE_PROJECT_ID"}. If no assignment is returned, list self-selectable work through GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/work-items using AGENT_WORKSPACE_TOKEN. Use AIFACTORY_API_BASE_URL only for runtime helpers such as runtime-claim, runtime-comments, and assignment runtime-update; read work-item comments with runtime-comments, not the owner UI /comments route.'
+        ? `On a fresh worker turn, source ${runtimeEnvPath} and call POST $AGENT_WORKSPACE_BASE_URL/v1/runtimes/$AGENT_WORKSPACE_RUNTIME_ID/resume with JSON {"projectId":"$AGENT_WORKSPACE_PROJECT_ID"}. If no assignment is returned, list self-selectable work through GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/work-items using AGENT_WORKSPACE_TOKEN. Use AIFACTORY_API_BASE_URL only for runtime helpers such as runtime-claim, runtime-comments, and assignment runtime-update; read work-item comments with runtime-comments, not the owner UI /comments route.`
         : '',
       ...(role === 'LEAD_AGENT'
         ? [
@@ -4133,7 +4325,7 @@ export class ProjectsService {
             'Available launchable project agent roles:',
             ...roleLines,
             '[Lead operating loop]',
-            '1. On a fresh lead pass, or when current board context is missing or stale, source /opt/data/AGENT_WORKSPACE_RUNTIME.env; call POST $AGENT_WORKSPACE_BASE_URL/v1/runtimes/$AGENT_WORKSPACE_RUNTIME_ID/resume with Authorization: Bearer $AGENT_WORKSPACE_TOKEN and JSON {"projectId":"$AGENT_WORKSPACE_PROJECT_ID"}; then read board/work items/members from the resume boardSnapshot or GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/board. Do not use AIFACTORY_API_BASE_URL for resume or board reads.',
+            `1. On a fresh lead pass, or when current board context is missing or stale, source ${runtimeEnvPath}; call POST $AGENT_WORKSPACE_BASE_URL/v1/runtimes/$AGENT_WORKSPACE_RUNTIME_ID/resume with Authorization: Bearer $AGENT_WORKSPACE_TOKEN and JSON {"projectId":"$AGENT_WORKSPACE_PROJECT_ID"}; then read board/work items/members from the resume boardSnapshot or GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/board. Do not use AIFACTORY_API_BASE_URL for resume or board reads.`,
             'When the project has many goals or work items, avoid one huge all-items pass. Page through goals with GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/goals?includeClosed=false&limit=100, then for each active goal read only its linked work items with GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/work-items?goalId=<goalId>&includeClosed=true&limit=100&page=1. Read full item details lazily with GET /v1/projects/$AGENT_WORKSPACE_PROJECT_ID/work-items/{workItemId} only for the small set you may accept, revise, duplicate-check, or use to create the next item.',
             'Maintain a durable lead workspace and lead goal ledger in project shared storage. Use coordination/lead.md for the human-readable frontier policy, polling cursor, next-goal queue, unresolved blockers, and project-level decisions. Use coordination/lead-goal-ledger.jsonl for per-goal machine checkpoints. At the start of a polling run, read lead.md if present, then read the ledger if present. For each goal you inspect, compute a small status digest from goal id/status/updatedAt plus linked work-item ids/statuses/workTypes and open assignment statuses; after deciding, append or rewrite one JSON record with pollingRunId, timestamp, goalId, topology, statusDigest, decision, nextAction, and any createdWorkItemIds. On later polling runs, skip a goal only when its latest ledger digest matches the current digest and there is no READY/NEEDS_REVISION/IN_REVIEW/ownerAction/resourceRequest work that needs lead attention. Write the ledger after each goal, and before stopping update coordination/lead.md with lastRunId, nextGoalCursor, unfinishedScanReason, skipped reasons, next-goal queue, unresolved blockers, and project-level decisions so a stopped runtime can resume without restarting the whole pass.',
             'For every active goal, classify the completion topology before expanding work: DIRECT, SERIAL, FAN_OUT_FAN_IN, TOTAL_TO_PARTS, TOTAL_PARTS_TOTAL, or ITERATIVE_REVIEW. Use linked item summaries first, then read exact item details, shared files, and targeted memory only when they can change the decision. If accepted upstream work is sufficient and no aggregation deliverable is required, mark the goal DONE when no linked non-terminal work remains. If accepted upstream work is sufficient but the goal requires aggregation, create one aggregation/synthesis/delivery item that depends on accepted upstream items; require review when the acceptance bar or status flow requires it; mark DONE only after the accepted items or accepted aggregation artifact satisfy the goal acceptance bar and no linked non-terminal work remains.',
@@ -4141,7 +4333,7 @@ export class ProjectsService {
             '3. If no item is ready, create or refine a dispatchable work item with scopeBrief, acceptanceCriteria, inputPacket, outputContract, dependencies, and any uploaded project file references in inputPacket.projectFiles. For new dispatchable work items, use the host runtime helper POST $AIFACTORY_API_BASE_URL/projects/$AGENT_WORKSPACE_PROJECT_ID/work-items/runtime-create with Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN so coordinator scheduling is triggered. acceptanceCriteria must be a single string; use newline-delimited numbered criteria instead of an array. outputContract must be a JSON object, never a plain string.',
             '4. If project settings show workItemStatusFlow.coordinator.enabled is not false, treat the COORDINATOR as the primary dispatcher: create or refine the smallest READY/NEEDS_REVISION work item with the correct workType, dependencies, and outputContract, then give the coordinator a chance to launch/assign the matching role. Use runtime-dispatch from the lead role as a fallback when coordinator dispatch is disabled, unavailable, stale, blocked by a failed assignment that you have reconciled, or has not produced an assignment and the project needs a new agent to keep moving.',
             '5. If a ready item needs execution with no suitable active worker runtime and lead fallback dispatch is warranted, prefer local-docker/local-runner WORKER_AGENT in local AgentCraft; use paid AWS cloud WORKER_AGENT for 1 day only when available runtime budget covers the daily commitment.',
-            `6. Lead dispatch fallback: if AIFACTORY_API_BASE_URL and AIFACTORY_RUNTIME_TOKEN are present, launch and dispatch through POST $AIFACTORY_API_BASE_URL/projects/{projectId}/work-items/{workItemId}/assignments/runtime-dispatch with Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN. Use AIFACTORY_API_BASE_URL exactly as provided; do not prepend /api if it already ends with /api. Use JSON fields role, launchIfMissing, launchMode, objective, contextPacket, and forceLaunchNew when you need one fresh worker per parallel task; omit agentType unless the owner explicitly requested a different runtime; the host will use the role/template launch default first and only fall back to the platform sub-agent default when no role default exists. The host will use owner-visible model API configs, first trying the current/owner-preferred config and then fallbacks; if all model APIs fail, it creates an owner work item. Default launchMode for this lead runtime is ${defaultLaunchMode}; fallback default agentType is ${defaultAgentType}. local-runner is for production/operator Docker hosts such as agentcraft.work, local-codex is for a registered local Codex CLI worker, local-docker is for backend-local Docker, aws-agentcore/aws-ecs are paid cloud modes. Non-Hermes agent types must use local-docker, local-runner, or local-codex.`,
+            `6. Lead dispatch fallback: if AIFACTORY_API_BASE_URL and AIFACTORY_RUNTIME_TOKEN are present, launch and dispatch through POST $AIFACTORY_API_BASE_URL/projects/{projectId}/work-items/{workItemId}/assignments/runtime-dispatch with Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN. Use AIFACTORY_API_BASE_URL exactly as provided; do not prepend /api if it already ends with /api. Use JSON fields role, launchIfMissing, launchMode, objective, contextPacket, and forceLaunchNew when you need one fresh worker per parallel task; omit agentType unless the owner explicitly requested a different runtime; the host will use the role/template launch default first and only fall back to the platform sub-agent default when no role default exists. The host will use owner-visible model API configs, first trying the current/owner-preferred config and then fallbacks; if all model APIs fail, it creates an owner work item. Default launchMode for this lead runtime is ${this.displayLaunchMode(defaultLaunchMode)}; fallback default agentType is ${defaultAgentType}. local-runner is for production/operator Docker hosts such as agentcraft.work, local-agent is for a registered local CLI worker on the owner's machine, local-docker is for backend-local Docker, aws-agentcore/aws-ecs are paid cloud modes. Non-Hermes agent types must use local-docker, local-runner, or local-agent.`,
             'For HackerOne target work, use one fresh worker runtime per independent program/goal so prior target context cannot contaminate the next target. Use forceLaunchNew: true for independent target items. Only set contextPacket.sameGoalContinuation: true or contextPacket.allowWorkerReuse: true for a bounded revision or continuation on the same target/goal.',
             'Capacity rule: if runtime-dispatch returns a project active-agent capacity error, do not call a non-existent /agent-runtimes/{memberId}/stop endpoint. Reuse a suitable IDLE worker without forceLaunchNew only for non-HackerOne work or an explicit same-goal continuation; for HackerOne independent target worker items, wait for fresh-agent capacity or create/use an owner capacity/settings item. SECURITY_AUDITOR/REVIEW_AGENT feedback work may reuse same-role IDLE runtimes because the auditor must re-read the current handoff and evidence. STOPPED and ERROR runtime sessions do not count as active capacity.',
             'Dispatch timeout rule: if runtime-dispatch times out, disconnects, or returns an unreadable response, do not immediately retry with forceLaunchNew. First inspect assignments/runtime-state and the exact work item; if any open or recently completed assignment already exists for the same workItemId and role, treat dispatch as pending or idempotently successful, poll/wake that assignment, and create a separate work item only when you truly need another parallel agent.',
@@ -4175,6 +4367,7 @@ export class ProjectsService {
             'For self-selected idle work, claim the item before implementation through POST $AIFACTORY_API_BASE_URL/projects/{projectId}/work-items/{workItemId}/assignments/runtime-claim using AIFACTORY_RUNTIME_TOKEN, then use the returned assignment.id and updateEndpoint for all progress updates. If claim fails, stop that item and report the concrete reason.',
             'Update your own assignment through PATCH $AIFACTORY_API_BASE_URL/projects/{projectId}/work-items/{workItemId}/assignments/{assignmentId}/runtime-update using AIFACTORY_RUNTIME_TOKEN: set ACTIVE before substantive work and COMPLETED after artifacts and handoff. COMPLETED moves the work item to IN_REVIEW.',
             'Create or update an execution run before substantive implementation when the project API/tool is available. Tie runs, artifacts, runtime-comments JSON {"content":"..."}, and handoff to both workItemId and the claimed/assigned assignmentId whenever an assignment exists.',
+            'When a work item requires handoff, persist it through runtime-comments or an artifact before marking the assignment COMPLETED; final chat/session text alone is not visible to reviewers as a durable handoff.',
             'For code work, prefer concrete shell and git execution in the repo workspace over describing a plan. If the message asks for a local commit, make the edit, commit it, and reply with the branch and commit SHA.',
             'Finish with a reviewable handoff containing: changed files or artifacts, verification commands/results, acceptance criteria status, residual risks, and reviewer instructions.',
           ].join('\n')
@@ -4446,8 +4639,8 @@ export class ProjectsService {
 
   private runtimeProgressLabel(session: AgentRuntimeSession) {
     const provider = String(session.provider || '').trim().toLowerCase();
-    const agentType = String(session.agentType || 'agent').trim().toLowerCase().replace(/_/g, '-') || 'agent';
-    if (provider === 'local-codex') return 'Local Codex';
+    const agentType = this.normalizedDisplayAgentType(session.agentType);
+    if (provider === 'local-codex') return this.queuedLocalRuntimeProviderLabel('local-codex', agentType);
     if (provider === 'local-runner') return agentType === 'pi' ? 'Local runner Pi agent' : 'Local runner';
     if (provider === 'local-docker') return agentType === 'pi' ? 'Local Docker Pi agent' : `Local Docker ${agentType} agent`;
     if (provider === 'aws-agentcore') return agentType === 'agent' ? 'AgentCore runtime' : `AgentCore ${agentType} agent`;
@@ -4617,6 +4810,7 @@ export class ProjectsService {
 
   private isLocalRuntimeClaimable(session: AgentRuntimeSession, provider: 'local-runner' | 'local-codex') {
     if (session.provider !== provider) return false;
+    if (this.queuedLocalRuntimeMissingModelConfig(session, provider)) return false;
     const waitingStatus = provider === 'local-codex' ? 'WAITING_LOCAL_CODEX' : 'WAITING_LOCAL_RUNNER';
     const queuedScheme = provider === 'local-codex' ? 'local-codex://' : 'local-runner://';
     if (session.localRunnerJob) {
@@ -4651,6 +4845,15 @@ export class ProjectsService {
     return [waitingStatus, 'STARTING', 'ERROR', 'IDLE'].includes(session.status || '');
   }
 
+  private queuedLocalRuntimeMissingModelConfig(
+    session: AgentRuntimeSession,
+    provider: 'local-runner' | 'local-codex',
+  ) {
+    if (session.llm?.configId) return false;
+    const agentType = String(session.agentType || '').trim().toLowerCase().replace(/_/g, '-');
+    return provider !== 'local-codex' || agentType === 'pi' || agentType === 'pi-agent';
+  }
+
   private withLocalRunnerHeartbeat(
     session: AgentRuntimeSession,
     now: string,
@@ -4675,7 +4878,7 @@ export class ProjectsService {
     now = new Date().toISOString(),
   ): AgentRuntimeSession {
     const queuedScheme = provider === 'local-codex' ? 'local-codex://' : 'local-runner://';
-    const providerLabel = provider === 'local-codex' ? 'Local Codex' : 'Local runner';
+    const providerLabel = this.queuedLocalRuntimeProviderLabel(provider, session.agentType);
     if (session.apiBaseUrl && !session.apiBaseUrl.startsWith(queuedScheme)) {
       return session;
     }
@@ -4979,7 +5182,7 @@ export class ProjectsService {
     }
 
     const now = new Date().toISOString();
-    const providerLabel = session.provider === 'local-codex' ? 'Local Codex' : 'Local runner';
+    const providerLabel = this.queuedLocalRuntimeProviderLabel(session.provider, session.agentType);
     const recoveryMessage = `${providerLabel} request stopped making progress after the server lost its active wait state. Restart the project runner and retry the message.`;
     const failedRequest: AgentRuntimeLocalRunnerBridgeRequest = {
       ...bridgeRequest,
@@ -5046,7 +5249,7 @@ export class ProjectsService {
         activeRequestConversationId: null,
       };
     }
-    const providerLabel = session.provider === 'local-codex' ? 'Local Codex' : 'Local runner';
+    const providerLabel = this.queuedLocalRuntimeProviderLabel(session.provider, session.agentType);
     const now = new Date().toISOString();
     const failedRequest: AgentRuntimeLocalRunnerBridgeRequest = {
       ...bridgeRequest,
@@ -5141,7 +5344,7 @@ export class ProjectsService {
     if (this.runtimeActiveRequestAgeMs(session) < this.localRunnerMissingRequestGraceMs()) {
       return session;
     }
-    const providerLabel = session.provider === 'local-codex' ? 'Local Codex' : 'Local runner';
+    const providerLabel = this.queuedLocalRuntimeProviderLabel(session.provider, session.agentType);
     const recoveryMessage = `${providerLabel} message request was lost before the runner could complete it. Please retry the message.`;
     return {
       ...session,
@@ -8490,14 +8693,18 @@ export class ProjectsService {
     launchMode: AgentRuntimeLaunchMode,
     agentType: string,
   ) {
+    const launchModeDisplay = this.displayLaunchMode(launchMode);
+    const launchTarget = this.displayLaunchTarget(launchMode, agentType);
     const values: Record<string, string> = {
       id: String(item?.id || ''),
       title: String(item?.title || item?.id || ''),
       workType: String(item?.workType || ''),
       status: String(item?.status || ''),
       role,
-      launchMode,
+      launchMode: launchModeDisplay,
+      launchModeRaw: launchMode,
       agentType,
+      launchTarget,
       goalTitle: String(item?.goal?.title || ''),
     };
     return template.replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g, (_match, key) => values[key] ?? '');
@@ -8514,7 +8721,7 @@ export class ProjectsService {
       const rendered = this.interpolateCoordinatorMessageTemplate(template.trim(), item, role, launchMode, agentType).trim();
       if (rendered) return rendered;
     }
-    return `当前有未被分配的 item ${item.title || item.id}，通过 ${launchMode}/${agentType} 拉起角色 ${role}。`;
+    return `当前有未被分配的 item ${item.title || item.id}，通过 ${this.displayLaunchTarget(launchMode, agentType)} 拉起角色 ${role}。`;
   }
 
   private async activeCoordinatorRoleCount(projectId: string, role: string, settings?: any) {
@@ -9020,7 +9227,7 @@ export class ProjectsService {
       const llmConfigId = llmConfigCandidates[0]?.id || '';
       if (!idleRuntime && !llmConfigId && !this.canLaunchWithoutModelConfig(launchMode, agentType)) {
         await logBlocked(
-          `${rule.role} requires an LLM API config, but the owner has no available config, so the agent cannot be launched with ${launchMode}/${agentType}.`,
+          `${rule.role} requires an LLM API config, but the owner has no available config, so the agent cannot be launched with ${this.displayLaunchTarget(launchMode, agentType)}.`,
           { reason: 'MODEL_API_MISSING', role: rule.role, launchMode, agentType },
           item,
         );
@@ -9277,7 +9484,7 @@ export class ProjectsService {
       this.defaultAgentRuntimeLaunchMode();
     const agentType = (dto.agentType || roleLaunchDefault.agentType || this.defaultAgentRuntimeType()).trim() || 'pi';
     if (agentType !== 'hermes-agent' && launchMode !== 'local-docker' && launchMode !== 'local-runner' && launchMode !== 'local-codex') {
-      throw new BadRequestException(`${agentType} is available for local Docker, local runner, or local Codex launches only`);
+      throw new BadRequestException(`${agentType} is available for local Docker, local runner, or local agent launches only`);
     }
     const launchableRoles = await this.listLaunchableRoleSummaries(projectRecord?.settings);
     const roleIsLaunchable = launchableRoles.some((entry) => entry.role === role);
@@ -9958,7 +10165,7 @@ export class ProjectsService {
     session: AgentRuntimeSession,
   ) {
     if (session.localRunnerJob) return session.localRunnerJob;
-    if (!session.llm?.configId && provider !== 'local-codex') {
+    if (this.queuedLocalRuntimeMissingModelConfig(session, provider)) {
       throw new BadRequestException('Local runner session is missing model configuration');
     }
     const llmConfig = session.llm?.configId
@@ -9987,7 +10194,7 @@ export class ProjectsService {
           apiKey: llmConfig.apiKey,
           modelName: llmConfig.modelName,
         }
-      : null);
+      : null, { provider });
   }
 
   private async claimQueuedLocalRuntime(
@@ -10032,10 +10239,10 @@ export class ProjectsService {
       localRunnerJob,
       currentActivity: hadLocalRunnerJob
         ? provider === 'local-codex'
-          ? 'Local Codex claimed the launch job'
+          ? 'Local agent runner claimed the launch job'
           : 'Local runner claimed the launch job and is starting Docker'
         : provider === 'local-codex'
-          ? 'Local Codex is reconnecting to this runtime'
+          ? 'Local agent runner is reconnecting to this runtime'
           : 'Local runner is restarting Docker for this runtime',
       updatedAt: new Date().toISOString(),
     };
@@ -10084,7 +10291,7 @@ export class ProjectsService {
       localRunnerJob: undefined,
     };
     const localRunnerJob = await this.ensureQueuedLocalRunnerJob(projectId, userId, member, provider, refreshedSession);
-    const providerLabel = provider === 'local-codex' ? 'Local Codex' : 'Local runner';
+    const providerLabel = this.queuedLocalRuntimeProviderLabel(provider, session.agentType);
     const waitingStatus = provider === 'local-codex' ? 'WAITING_LOCAL_CODEX' : 'WAITING_LOCAL_RUNNER';
     const requests = (session.localRunnerBridge?.requests || []).map((request) => {
       if (!['PENDING', 'RUNNING'].includes(request.status)) return request;
@@ -10322,7 +10529,7 @@ export class ProjectsService {
     }
 
     const now = new Date().toISOString();
-    const providerLabel = provider === 'local-codex' ? 'Local Codex' : 'Local runner';
+    const providerLabel = this.queuedLocalRuntimeProviderLabel(provider, session.agentType);
     const waitingStatus = provider === 'local-codex' ? 'WAITING_LOCAL_CODEX' : 'WAITING_LOCAL_RUNNER';
     const reason = String(dto.reason || 'runner-disconnected').slice(0, 120);
     const message = String(dto.message || `${providerLabel} disconnected. Restart the project runner to reconnect this runtime.`).slice(0, 1000);
@@ -10399,6 +10606,7 @@ export class ProjectsService {
     const now = new Date().toISOString();
     const failed = dto.status === 'ERROR' || Boolean(dto.error);
     const connectedLocalCodex = !failed && provider === 'local-codex';
+    const providerLabel = this.queuedLocalRuntimeProviderLabel(provider, session.agentType);
     const completedSession: AgentRuntimeSession = {
       ...session,
       image: dto.image || session.image,
@@ -10409,10 +10617,10 @@ export class ProjectsService {
       status: failed ? 'ERROR' : connectedLocalCodex ? 'IDLE' : 'STARTING',
       currentActivity: failed
         ? provider === 'local-codex'
-          ? 'Local Codex failed to connect'
+          ? `${providerLabel} failed to connect`
           : 'Local runner failed to start Docker'
         : provider === 'local-codex'
-          ? 'Local Codex connected'
+          ? `${providerLabel} connected`
           : 'Local runner started Docker; waiting for runtime health',
       lastError: dto.error || null,
       dockerStatus: connectedLocalCodex
@@ -10430,7 +10638,7 @@ export class ProjectsService {
         projectId,
         status: 'READY',
         message: provider === 'local-codex'
-          ? `${member.role} Codex runtime connected by local Codex`
+          ? `${member.role} ${providerLabel} runtime connected by local agent runner`
           : `${member.role} Hermes runtime started by local runner`,
       }).catch(() => null);
     }
@@ -10640,11 +10848,12 @@ export class ProjectsService {
     const now = new Date().toISOString();
     const presenceId = tokenId ? `${provider}:${tokenId}` : `${provider}:user:${userId}`;
     const existing = this.localRunnerPresencesFromSettings(project.settings).find((presence) => presence.id === presenceId);
-    const name = String(dto.name || tokenName || (provider === 'local-codex' ? 'Local Codex runner' : 'Local Docker runner')).trim();
+    const defaultName = this.queuedLocalRuntimeRunnerName(provider);
+    const name = String(dto.name || tokenName || defaultName).trim();
     const presence: ProjectLocalRunnerPresenceRecord = {
       id: presenceId,
       provider,
-      name: name || (provider === 'local-codex' ? 'Local Codex runner' : 'Local Docker runner'),
+      name: name || defaultName,
       userId,
       tokenId: tokenId || null,
       startedAt: existing?.startedAt || now,
@@ -10697,11 +10906,12 @@ export class ProjectsService {
     const now = new Date().toISOString();
     const presenceId = tokenId ? `${provider}:${tokenId}` : `${provider}:user:${userId}`;
     const existing = this.localRunnerPresencesFromSettings(project.settings).find((presence) => presence.id === presenceId);
-    const name = String(dto.name || tokenName || existing?.name || (provider === 'local-codex' ? 'Local Codex runner' : 'Local Docker runner')).trim();
+    const defaultName = this.queuedLocalRuntimeRunnerName(provider);
+    const name = String(dto.name || tokenName || existing?.name || defaultName).trim();
     const presence: ProjectLocalRunnerPresenceRecord = {
       id: presenceId,
       provider,
-      name: name || (provider === 'local-codex' ? 'Local Codex runner' : 'Local Docker runner'),
+      name: name || defaultName,
       userId,
       tokenId: tokenId || null,
       startedAt: existing?.startedAt || now,
@@ -10743,11 +10953,12 @@ export class ProjectsService {
     const settings = await this.readAccountLocalRunnerSettings(userId);
     const presenceId = tokenId ? `${provider}:${tokenId}` : `${provider}:user:${userId}`;
     const existing = settings.presences.find((presence) => presence.id === presenceId);
-    const name = String(dto.name || tokenName || (provider === 'local-codex' ? 'Local Codex runner' : 'Local Docker runner')).trim();
+    const defaultName = this.queuedLocalRuntimeRunnerName(provider);
+    const name = String(dto.name || tokenName || defaultName).trim();
     const presence: ProjectLocalRunnerPresenceRecord = {
       id: presenceId,
       provider,
-      name: name || (provider === 'local-codex' ? 'Local Codex runner' : 'Local Docker runner'),
+      name: name || defaultName,
       userId,
       tokenId: tokenId || null,
       startedAt: existing?.startedAt || now,
@@ -10784,11 +10995,12 @@ export class ProjectsService {
     const settings = await this.readAccountLocalRunnerSettings(userId);
     const presenceId = tokenId ? `${provider}:${tokenId}` : `${provider}:user:${userId}`;
     const existing = settings.presences.find((presence) => presence.id === presenceId);
-    const name = String(dto.name || tokenName || existing?.name || (provider === 'local-codex' ? 'Local Codex runner' : 'Local Docker runner')).trim();
+    const defaultName = this.queuedLocalRuntimeRunnerName(provider);
+    const name = String(dto.name || tokenName || existing?.name || defaultName).trim();
     const presence: ProjectLocalRunnerPresenceRecord = {
       id: presenceId,
       provider,
-      name: name || (provider === 'local-codex' ? 'Local Codex runner' : 'Local Docker runner'),
+      name: name || defaultName,
       userId,
       tokenId: tokenId || null,
       startedAt: existing?.startedAt || now,
@@ -12199,6 +12411,7 @@ export class ProjectsService {
       'with Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN and body {"status":"ACTIVE"}.',
       '',
       'After submitting artifacts and handoff, update the same runtime endpoint with {"status":"COMPLETED"} so the work item moves to IN_REVIEW.',
+      `Before marking COMPLETED, make the handoff durable: POST $AIFACTORY_API_BASE_URL/projects/${projectId}/work-items/${assignment.workItemId}/runtime-comments with Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN and JSON {"content":"<handoff markdown>"} unless you submitted an equivalent handoff artifact. Final chat text alone is not a durable handoff.`,
       'Keep this turn bounded: for research or validation work, use command-level network timeouts for external calls, deliver the smallest reviewable phase before the turn becomes too large or silent, write required evidence or notes to project shared files with project-file-write/project-file-upload, verify the shared path, then mark COMPLETED and leave follow-up hypotheses in the handoff or a new work item.',
       Array.isArray((packet as any).outputProjectFiles) && (packet as any).outputProjectFiles.length
         ? [
@@ -12556,12 +12769,11 @@ export class ProjectsService {
     };
     const updatedRequests = [...requests];
     updatedRequests[requestIndex] = nextRequest;
+    const providerLabel = this.queuedLocalRuntimeProviderLabel(provider, session.agentType);
     const updatedSession: AgentRuntimeSession = {
       ...session,
       status: 'TYPING',
-      currentActivity: provider === 'local-codex'
-        ? 'Local Codex is processing the message'
-        : 'Local runner is processing the message',
+      currentActivity: `${providerLabel} is processing the message`,
       updatedAt: now,
       localRunnerBridge: {
         ...(session.localRunnerBridge || {}),
@@ -14184,7 +14396,7 @@ export class ProjectsService {
         ...typingSession,
         activeRequestStartedAt: typingSession.activeRequestStartedAt || typingSession.lastMessageAt || now,
         currentActivity: typingSession.provider === 'local-codex'
-          ? 'Waiting for local Codex to pick up the message'
+          ? `Waiting for ${this.queuedLocalRuntimeProviderLabel('local-codex', typingSession.agentType)} to pick up the message`
           : 'Waiting for local runner to pick up the message',
         updatedAt: now,
         localRunnerBridge: {
@@ -14435,10 +14647,10 @@ export class ProjectsService {
         currentActivity: displayStatusText
           ? displayStatusText
           : outputText
-            ? `Streaming response from ${provider === 'local-codex' ? 'local Codex' : 'local runner'}`
+            ? `Streaming response from ${provider === 'local-codex' ? this.queuedLocalRuntimeProviderLabel('local-codex', session.agentType) : 'local runner'}`
             : statusText
               ? statusText
-              : `${provider === 'local-codex' ? 'Local Codex' : 'Local runner'} is processing the message`,
+              : `${this.queuedLocalRuntimeProviderLabel(provider, session.agentType)} is processing the message`,
         lastStreamAt: outputText || statusText ? now : session.lastStreamAt,
         updatedAt: now,
         recentActions: Array.isArray(dto.recentActions) ? dto.recentActions.slice(-6) : session.recentActions,
@@ -15935,7 +16147,14 @@ export class ProjectsService {
       throw new NotFoundException('Project work item not found');
     }
 
-    return this.sanitizeWorkItemForResponse(item);
+    const relatedItems = await this.relatedWorkItemSummaries(projectId, item.dependsOn);
+    const acceptedUpstreamItems = this.acceptedUpstreamItemSummaries(item.inputPacket, relatedItems);
+    return this.sanitizeWorkItemForResponse({
+      ...item,
+      relatedItems,
+      dependencyItems: relatedItems,
+      acceptedUpstreamItems,
+    });
   }
 
   async listWorkItemComments(projectId: string, workItemId: string, userId: string | null | undefined) {
@@ -16150,9 +16369,12 @@ export class ProjectsService {
       ],
     });
     const workItemContext = await this.recentWorkItemContextForAssignment(projectId, workItemId);
+    const relatedItems = await this.relatedWorkItemSummaries(projectId, workItem.dependsOn);
+    const acceptedUpstreamItems = this.acceptedUpstreamItemSummaries(workItem.inputPacket, relatedItems);
     const projectFiles = this.mergeProjectFileReferences(
       initialProjectFiles,
       Array.isArray(workItemContext.projectFiles) ? workItemContext.projectFiles : [],
+      this.projectFileRefsFromAcceptedUpstreamItems(acceptedUpstreamItems),
     );
 
     const workItemInputPacket =
@@ -16179,6 +16401,9 @@ export class ProjectsService {
       memoryContextPolicy: memoryRefs.length
         ? 'These memory refs were selected at dispatch time; treat them as reusable project constraints/decisions/risks relevant to this item.'
         : 'No reusable project memory was selected for this assignment at dispatch time.',
+      relatedWorkItems: relatedItems,
+      dependencyItems: relatedItems,
+      acceptedUpstreamItems,
       revisionFeedback: workItemContext.latestChangeRequest ?? provided.revisionFeedback ?? null,
       workItemContext: {
         ...(provided.workItemContext && typeof provided.workItemContext === 'object' && !Array.isArray(provided.workItemContext)
@@ -16197,6 +16422,9 @@ export class ProjectsService {
         inputPacket: workItemInputPacket,
         outputContract: workItem.outputContract,
         dependsOn: workItem.dependsOn,
+        relatedItems,
+        dependencyItems: relatedItems,
+        acceptedUpstreamItems,
         concurrencyMode: workItem.concurrencyMode,
         priority: workItem.priority,
         dueAt: workItem.dueAt,
@@ -16225,6 +16453,7 @@ export class ProjectsService {
         'Confirm objective, scope brief, acceptance criteria, dependencies, and output contract.',
         `Use --work-item ${workItem.id} on project-file helper writes/uploads/deletes, or include X-AgentCraft-Work-Item-Id/workItemId on direct item-scoped workspace writes.`,
         'Read and respect memoryRefs in this packet; do not do a broad memory search unless the packet is missing historical context.',
+        'Inspect relatedWorkItems/dependencyItems and acceptedUpstreamItems when present; use their ids, descriptions, and output paths to understand upstream context before opening full item details.',
         'Read every referenced project file in projectFiles before analyzing or editing.',
         'If revisionFeedback or workItemContext.reviews contains requested changes, address those specific review points before marking the assignment complete.',
         'Check workItemContext.comments and attachment lists for owner/reviewer-provided context that is not repeated in the title or scope brief.',
@@ -17185,6 +17414,7 @@ export class ProjectsService {
     const assignment = await this.ensureProjectAssignment(projectId, workItemId, assignmentId);
     const canManage = project.ownerId === userId || project.leadAgentUserId === userId;
     const canUpdate = canManage || assignment.assigneeUserId === userId;
+    const isReviewAssignment = String(assignment.role || '').toUpperCase() === 'REVIEW_AGENT';
 
     if (!canUpdate) {
       throw new ForbiddenException('Only the project manager or assignee can update this assignment');
@@ -17224,7 +17454,7 @@ export class ProjectsService {
       },
     });
 
-    if (dto.status === 'ACTIVE') {
+    if (dto.status === 'ACTIVE' && !isReviewAssignment) {
       const workItem = await this.prisma.projectWorkItem.findUnique({
         where: { id: workItemId },
         select: { status: true },
@@ -17236,7 +17466,7 @@ export class ProjectsService {
         });
         finalWorkItemStatus = statusFlow.activeStatus;
       }
-    } else if (dto.status === 'COMPLETED') {
+    } else if (dto.status === 'COMPLETED' && !isReviewAssignment) {
       const workItem = await this.prisma.projectWorkItem.findUnique({
         where: { id: workItemId },
         select: { status: true },

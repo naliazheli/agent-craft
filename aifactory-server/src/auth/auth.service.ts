@@ -16,6 +16,8 @@ import { LoginDto } from './dto/login.dto';
 import { OAuthUser } from './types/oauth-user';
 import { EmailVerificationService } from './email-verification.service';
 import { normalizeOptionalEmail, normalizeSystemEmail } from '../common/system-email';
+import { resolveJwtSecret } from './jwt-secret';
+import { resolveOAuthRedirectUrl } from './oauth-redirect';
 
 @Injectable()
 export class AuthService {
@@ -180,15 +182,15 @@ export class AuthService {
     }
 
     const callbackUrl =
-      process.env.GITHUB_CALLBACK_URL || 'http://localhost:3000/api/auth/github/callback';
+      process.env.GITHUB_CALLBACK_URL || 'http://localhost:3100/api/auth/github/callback';
     const state = this.jwtService.sign(
       {
         type: 'github_bind',
         userId,
-        redirect: redirect || process.env.OAUTH_REDIRECT_URL || 'http://localhost:5173/oauth/callback',
+        redirect: resolveOAuthRedirectUrl(redirect),
       },
       {
-        secret: process.env.JWT_SECRET || 'dev-secret',
+        secret: resolveJwtSecret(),
         expiresIn: '10m',
       },
     );
@@ -351,7 +353,7 @@ export class AuthService {
 
     try {
       const payload = this.jwtService.verify(state, {
-        secret: process.env.JWT_SECRET || 'dev-secret',
+        secret: resolveJwtSecret(),
       }) as { type?: string; userId?: string; redirect?: string };
 
       if (payload.type === 'github_bind' && payload.userId) {

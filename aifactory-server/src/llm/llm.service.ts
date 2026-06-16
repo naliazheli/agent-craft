@@ -1,5 +1,6 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
 import { LlmChatDto, LlmApiType } from './dto/chat.dto';
+import { resolveSafeLlmBaseUrl } from './ssrf-guard';
 
 @Injectable()
 export class LlmService {
@@ -15,7 +16,7 @@ export class LlmService {
   }
 
   private async callOpenAi(dto: LlmChatDto): Promise<{ content: string; tokensUsed: number }> {
-    const url = `${dto.apiUrl.replace(/\/+$/, '')}/chat/completions`;
+    const url = `${await resolveSafeLlmBaseUrl(dto.apiUrl)}/chat/completions`;
 
     const res = await fetch(url, {
       method: 'POST',
@@ -43,7 +44,7 @@ export class LlmService {
   }
 
   private async callClaude(dto: LlmChatDto): Promise<{ content: string; tokensUsed: number }> {
-    const url = `${dto.apiUrl.replace(/\/+$/, '')}/messages`;
+    const url = `${await resolveSafeLlmBaseUrl(dto.apiUrl)}/messages`;
 
     const res = await fetch(url, {
       method: 'POST',

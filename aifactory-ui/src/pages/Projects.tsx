@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Plus, Search, Layers, Users, FileStack, RefreshCw } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, Plus, Search, Layers, Users, FileStack, RefreshCw, Settings2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -16,6 +16,271 @@ const PROJECT_STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'success'
   COMPLETED: 'success',
   ARCHIVED: 'secondary',
 };
+
+type AgentLaunchMode = 'local-docker' | 'local-runner' | 'local-codex' | 'aws-ecs' | 'aws-agentcore';
+
+type ProjectAdvancedOptionsForm = {
+  coordinatorEnabled: boolean;
+  coordinatorLaunchMode: AgentLaunchMode;
+  preferredAgentType: string;
+  maxActiveAgents: string;
+  maxActiveGoals: string;
+  coordinatorMaxAgents: string;
+  maxDispatchesPerTick: string;
+};
+
+const DEFAULT_PROJECT_MAX_ACTIVE_AGENTS = 10;
+const PROJECT_MAX_ACTIVE_AGENTS_CAP = 50;
+const DEFAULT_PROJECT_MAX_ACTIVE_GOALS = 5;
+const PROJECT_MAX_ACTIVE_GOALS_CAP = 50;
+const DEFAULT_COORDINATOR_MAX_DISPATCHES_PER_TICK = 3;
+const DEFAULT_COORDINATOR_AGENT_TYPE = 'pi';
+const BACKEND_AGENT_LAUNCH_MODES: AgentLaunchMode[] = [
+  'local-docker',
+  'local-runner',
+  'local-codex',
+  'aws-ecs',
+  'aws-agentcore',
+];
+
+function isAgentcraftProductionHost(hostname: string) {
+  const normalizedHostname = hostname.toLowerCase();
+  return normalizedHostname === 'agentcraft.work' || normalizedHostname.endsWith('.agentcraft.work');
+}
+
+const IS_PRODUCTION_AGENTCRAFT_HOST =
+  typeof window !== 'undefined' && isAgentcraftProductionHost(window.location.hostname);
+const DEFAULT_COORDINATOR_LAUNCH_MODE: AgentLaunchMode = IS_PRODUCTION_AGENTCRAFT_HOST ? 'local-runner' : 'local-docker';
+
+const AGENT_LAUNCH_MODE_OPTIONS: Array<{ value: AgentLaunchMode; label: string }> = [
+  ...(!IS_PRODUCTION_AGENTCRAFT_HOST
+    ? [{ value: 'local-docker' as AgentLaunchMode, label: 'Local Docker Agent' }]
+    : []),
+  ...(IS_PRODUCTION_AGENTCRAFT_HOST
+    ? [{ value: 'local-runner' as AgentLaunchMode, label: 'Local Runner Agent' }]
+    : []),
+  { value: 'local-codex', label: 'Local Agent' },
+];
+
+const AGENT_TYPE_OPTIONS: Array<{ value: string; label: string; launchModes: AgentLaunchMode[] }> = [
+  { value: 'pi', label: 'Pi', launchModes: ['local-docker', 'local-runner', 'local-codex'] },
+  { value: 'hermes-agent', label: 'Hermes Agent', launchModes: ['local-docker', 'local-runner'] },
+  { value: 'codex', label: 'Codex', launchModes: ['local-docker', 'local-runner', 'local-codex'] },
+];
+
+function objectRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function normalizeLaunchMode(value: unknown): AgentLaunchMode | null {
+  return BACKEND_AGENT_LAUNCH_MODES.includes(value as AgentLaunchMode)
+    ? value as AgentLaunchMode
+    : null;
+}
+
+function isCloudAgentLaunchMode(mode?: AgentLaunchMode | null) {
+  return mode === 'aws-ecs' || mode === 'aws-agentcore';
+}
+
+function normalizeAvailableLaunchMode(value: unknown): AgentLaunchMode {
+  const mode = normalizeLaunchMode(value);
+  if (!mode || isCloudAgentLaunchMode(mode)) return DEFAULT_COORDINATOR_LAUNCH_MODE;
+  if (IS_PRODUCTION_AGENTCRAFT_HOST && mode === 'local-docker') return 'local-runner';
+  if (!IS_PRODUCTION_AGENTCRAFT_HOST && mode === 'local-runner') return 'local-docker';
+  return AGENT_LAUNCH_MODE_OPTIONS.some((option) => option.value === mode)
+    ? mode
+    : DEFAULT_COORDINATOR_LAUNCH_MODE;
+}
+
+function agentTypeOptionsForLaunchMode(launchMode: AgentLaunchMode) {
+  return AGENT_TYPE_OPTIONS.filter((option) => option.launchModes.includes(launchMode));
+}
+
+function normalizeAgentTypeForLaunchMode(agentType: unknown, launchMode: AgentLaunchMode) {
+  const requested = typeof agentType === 'string' ? agentType.trim() : '';
+  const supportedOptions = agentTypeOptionsForLaunchMode(launchMode);
+  const supported = supportedOptions.find((option) => option.value === requested);
+  return supported?.value || supportedOptions[0]?.value || DEFAULT_COORDINATOR_AGENT_TYPE;
+}
+
+function launchModeLabel(launchMode: AgentLaunchMode) {
+  return AGENT_LAUNCH_MODE_OPTIONS.find((option) => option.value === launchMode)?.label || launchMode;
+}
+
+function agentTypeLabel(agentType: string) {
+  return AGENT_TYPE_OPTIONS.find((option) => option.value === agentType)?.label || agentType;
+}
+
+function boundedInteger(value: unknown, fallback: number, min: number, max: number) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.min(Math.max(Math.floor(numeric), min), max);
+}
+
+function positiveIntegerString(value: unknown, fallback: number, min: number, max: number) {
+  return String(boundedInteger(value, fallback, min, max));
+}
+
+function templateCoordinator(template?: ProjectTemplateSummary): Record<string, unknown> {
+  const flow = objectRecord(template?.workItemStatusFlow);
+  return objectRecord(flow.coordinator);
+}
+
+function templateSettings(template?: ProjectTemplateSummary): Record<string, unknown> {
+  return objectRecord(template?.settings);
+}
+
+function advancedOptionsFromTemplate(template?: ProjectTemplateSummary): ProjectAdvancedOptionsForm {
+  const settings = templateSettings(template);
+  const coordinator = templateCoordinator(template);
+  const firstLaunchProfile = Array.isArray(template?.roleLaunchProfiles)
+    ? template.roleLaunchProfiles.find((profile) => objectRecord(profile).role)
+    : null;
+  const launchProfileRecord = objectRecord(firstLaunchProfile);
+  const launchMode =
+    normalizeAvailableLaunchMode(coordinator.launchMode || launchProfileRecord.launchMode) ||
+    DEFAULT_COORDINATOR_LAUNCH_MODE;
+  const preferredAgentType = normalizeAgentTypeForLaunchMode(
+    coordinator.agentType || launchProfileRecord.agentType,
+    launchMode,
+  );
+  const maxActiveAgents = boundedInteger(
+    settings.maxActiveAgents ?? coordinator.maxAgents,
+    DEFAULT_PROJECT_MAX_ACTIVE_AGENTS,
+    1,
+    PROJECT_MAX_ACTIVE_AGENTS_CAP,
+  );
+  return {
+    coordinatorEnabled: coordinator.enabled !== false,
+    coordinatorLaunchMode: launchMode,
+    preferredAgentType,
+    maxActiveAgents: String(maxActiveAgents),
+    maxActiveGoals: positiveIntegerString(
+      settings.maxActiveGoals,
+      DEFAULT_PROJECT_MAX_ACTIVE_GOALS,
+      1,
+      PROJECT_MAX_ACTIVE_GOALS_CAP,
+    ),
+    coordinatorMaxAgents: positiveIntegerString(
+      coordinator.maxAgents,
+      maxActiveAgents,
+      1,
+      PROJECT_MAX_ACTIVE_AGENTS_CAP,
+    ),
+    maxDispatchesPerTick: positiveIntegerString(
+      coordinator.maxDispatchesPerTick,
+      DEFAULT_COORDINATOR_MAX_DISPATCHES_PER_TICK,
+      1,
+      20,
+    ),
+  };
+}
+
+function templateLaunchableRoles(template?: ProjectTemplateSummary) {
+  if (!template?.roles?.length) return [];
+  return template.roles
+    .filter((role) => role.role && role.role !== 'OWNER' && role.role !== 'COORDINATOR')
+    .map((role) => role.role);
+}
+
+function projectRoleAgentDefaultsFromTemplate(
+  template: ProjectTemplateSummary | undefined,
+  launchMode: AgentLaunchMode,
+  agentType: string,
+) {
+  const profiles = Array.isArray(template?.roleLaunchProfiles)
+    ? template.roleLaunchProfiles
+        .map((profile) => objectRecord(profile))
+        .filter((profile) => typeof profile.role === 'string' && profile.role.trim())
+    : [];
+  const fallbackProfiles = profiles.length
+    ? profiles
+    : templateLaunchableRoles(template).map((role) => ({ role }));
+
+  return Object.fromEntries(
+    fallbackProfiles.map((profile) => {
+      const role = String(profile.role).trim();
+      return [
+        role,
+        {
+          ...profile,
+          role,
+          launchMode,
+          agentType,
+        },
+      ];
+    }),
+  );
+}
+
+function buildCreateProjectSettings(
+  template: ProjectTemplateSummary | undefined,
+  advancedOptions: ProjectAdvancedOptionsForm,
+) {
+  const maxActiveAgents = boundedInteger(
+    advancedOptions.maxActiveAgents,
+    DEFAULT_PROJECT_MAX_ACTIVE_AGENTS,
+    1,
+    PROJECT_MAX_ACTIVE_AGENTS_CAP,
+  );
+  const maxActiveGoals = boundedInteger(
+    advancedOptions.maxActiveGoals,
+    DEFAULT_PROJECT_MAX_ACTIVE_GOALS,
+    1,
+    PROJECT_MAX_ACTIVE_GOALS_CAP,
+  );
+  const coordinatorMaxAgents = boundedInteger(
+    advancedOptions.coordinatorMaxAgents,
+    maxActiveAgents,
+    1,
+    PROJECT_MAX_ACTIVE_AGENTS_CAP,
+  );
+  const maxDispatchesPerTick = boundedInteger(
+    advancedOptions.maxDispatchesPerTick,
+    DEFAULT_COORDINATOR_MAX_DISPATCHES_PER_TICK,
+    1,
+    20,
+  );
+  const launchMode = normalizeAvailableLaunchMode(advancedOptions.coordinatorLaunchMode);
+  const agentType = normalizeAgentTypeForLaunchMode(advancedOptions.preferredAgentType, launchMode);
+  const flow = objectRecord(template?.workItemStatusFlow);
+  const coordinator = objectRecord(flow.coordinator);
+  const dispatchRules = Array.isArray(flow.dispatchRules)
+    ? flow.dispatchRules.map((rule) =>
+        rule && typeof rule === 'object' && !Array.isArray(rule)
+          ? { ...rule, launchMode, agentType }
+          : rule,
+      )
+    : undefined;
+  const projectRoleAgentDefaults = projectRoleAgentDefaultsFromTemplate(template, launchMode, agentType);
+  const settings: Record<string, unknown> = {
+    maxActiveAgents,
+    maxActiveGoals,
+  };
+
+  if (Object.keys(projectRoleAgentDefaults).length) {
+    settings.projectRoleAgentDefaults = projectRoleAgentDefaults;
+  }
+
+  if (Object.keys(flow).length) {
+    settings.workItemStatusFlow = {
+      ...flow,
+      ...(dispatchRules ? { dispatchRules } : {}),
+      coordinator: {
+        ...coordinator,
+        enabled: advancedOptions.coordinatorEnabled,
+        launchMode,
+        agentType,
+        maxAgents: coordinatorMaxAgents,
+        maxDispatchesPerTick,
+      },
+    };
+  }
+
+  return settings;
+}
 
 const PROJECTS_TOUR_STEPS: GuidedTourStep[] = [
   {
@@ -52,6 +317,8 @@ export function Projects() {
   const navigate = useNavigate();
   const token = useAuthStore((state) => state.token);
   const loadProjectsRequestId = useRef(0);
+  const templatePickerRef = useRef<HTMLDivElement>(null);
+  const advancedOptionsTouchedRef = useRef(false);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [projectListMeta, setProjectListMeta] = useState<ProjectListMeta | null>(null);
   const [loading, setLoading] = useState(true);
@@ -69,6 +336,25 @@ export function Projects() {
   const [templates, setTemplates] = useState<ProjectTemplateSummary[]>([]);
   const [templatesLoading, setTemplatesLoading] = useState(false);
   const [templatesError, setTemplatesError] = useState('');
+  const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
+  const [hoveredTemplateId, setHoveredTemplateId] = useState('');
+  const [advancedOptionsOpen, setAdvancedOptionsOpen] = useState(false);
+  const [advancedOptions, setAdvancedOptions] = useState<ProjectAdvancedOptionsForm>(() =>
+    advancedOptionsFromTemplate(),
+  );
+
+  const markAdvancedOptionsTouched = (updates: Partial<ProjectAdvancedOptionsForm>) => {
+    advancedOptionsTouchedRef.current = true;
+    setAdvancedOptions((prev) => ({ ...prev, ...updates }));
+  };
+
+  const handleCoordinatorLaunchModeChange = (value: string) => {
+    const launchMode = normalizeAvailableLaunchMode(value);
+    markAdvancedOptionsTouched({
+      coordinatorLaunchMode: launchMode,
+      preferredAgentType: normalizeAgentTypeForLaunchMode(advancedOptions.preferredAgentType, launchMode),
+    });
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -88,6 +374,13 @@ export function Projects() {
         if (cancelled) return;
         const list = res.templates || [];
         setTemplates(list);
+        if (!advancedOptionsTouchedRef.current) {
+          const fallbackTemplate =
+            list.find((template) => template.id === form.projectTemplateId) ||
+            list.find((template) => template.id === 'default') ||
+            list[0];
+          setAdvancedOptions(advancedOptionsFromTemplate(fallbackTemplate));
+        }
         setForm((prev) => {
           if (prev.projectTemplateId && list.some((t) => t.id === prev.projectTemplateId)) {
             return prev;
@@ -108,6 +401,28 @@ export function Projects() {
       cancelled = true;
     };
   }, [token]);
+
+  useEffect(() => {
+    if (!templatePickerOpen) return;
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (!templatePickerRef.current?.contains(event.target as Node)) {
+        setTemplatePickerOpen(false);
+        setHoveredTemplateId('');
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setTemplatePickerOpen(false);
+        setHoveredTemplateId('');
+      }
+    };
+    document.addEventListener('mousedown', closeOnOutsideClick);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutsideClick);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [templatePickerOpen]);
 
   const loadProjects = async () => {
     const requestId = ++loadProjectsRequestId.current;
@@ -171,6 +486,34 @@ export function Projects() {
     () => templates.find((template) => template.id === form.projectTemplateId),
     [form.projectTemplateId, templates],
   );
+  const hoveredTemplate = useMemo(
+    () => templates.find((template) => template.id === hoveredTemplateId),
+    [hoveredTemplateId, templates],
+  );
+  const selectedTemplateLabel = selectedTemplate
+    ? `${selectedTemplate.label}${selectedTemplate.id === 'default' ? ' (default)' : ''}`
+    : templatesLoading
+      ? 'Loading project templates...'
+      : 'General Project Template (default)';
+  const selectedCoordinatorLaunchMode = normalizeAvailableLaunchMode(advancedOptions.coordinatorLaunchMode);
+  const selectedPreferredAgentType = normalizeAgentTypeForLaunchMode(
+    advancedOptions.preferredAgentType,
+    selectedCoordinatorLaunchMode,
+  );
+  const preferredAgentTypeOptions = agentTypeOptionsForLaunchMode(selectedCoordinatorLaunchMode);
+  const advancedOptionsSummary = [
+    launchModeLabel(selectedCoordinatorLaunchMode),
+    agentTypeLabel(selectedPreferredAgentType),
+    `${advancedOptions.maxActiveAgents || DEFAULT_PROJECT_MAX_ACTIVE_AGENTS} active`,
+  ].join(' / ');
+
+  const handleSelectTemplate = (template: ProjectTemplateSummary) => {
+    setForm((prev) => ({ ...prev, projectTemplateId: template.id }));
+    setAdvancedOptions(advancedOptionsFromTemplate(template));
+    advancedOptionsTouchedRef.current = false;
+    setTemplatePickerOpen(false);
+    setHoveredTemplateId('');
+  };
 
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -182,11 +525,13 @@ export function Projects() {
     setCreating(true);
     setError('');
     try {
+      const projectSettings = buildCreateProjectSettings(selectedTemplate, advancedOptions);
       await api.projects.create({
         initialGoal: form.initialGoal,
         visibility: form.visibility,
         githubUrl: form.githubUrl || undefined,
         projectTemplateId: form.projectTemplateId || undefined,
+        settings: projectSettings,
       }).then((project) => {
         setForm((prev) => ({
           initialGoal: '',
@@ -194,6 +539,8 @@ export function Projects() {
           githubUrl: '',
           projectTemplateId: prev.projectTemplateId || 'default',
         }));
+        setAdvancedOptions(advancedOptionsFromTemplate(selectedTemplate));
+        advancedOptionsTouchedRef.current = false;
         navigate(`/projects/${project.id}`);
       });
     } catch (err: any) {
@@ -342,28 +689,64 @@ export function Projects() {
                 <div className="flex items-center justify-between gap-3">
                   <label className="text-sm font-medium">Project Template</label>
                 </div>
-                <select
-                  data-tour="projects-template"
-                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                  value={form.projectTemplateId}
-                  onChange={(e) =>
-                    setForm((prev) => ({ ...prev, projectTemplateId: e.target.value }))
-                  }
-                  disabled={templatesLoading || !templates.length}
-                >
-                  {templates.length ? (
-                    templates.map((template) => (
-                      <option key={template.id} value={template.id}>
-                        {template.label}
-                        {template.id === 'default' ? ' (default)' : ''}
-                      </option>
-                    ))
-                  ) : templatesLoading ? (
-                    <option value="default">Loading project templates...</option>
-                  ) : (
-                    <option value="default">Default Project Template (default)</option>
+                <div ref={templatePickerRef} className="relative" data-tour="projects-template">
+                  <button
+                    type="button"
+                    aria-haspopup="listbox"
+                    aria-expanded={templatePickerOpen}
+                    className="flex min-h-10 w-full items-center justify-between gap-3 rounded-md border border-input bg-background px-3 py-2 text-left text-sm ring-offset-background transition-colors hover:border-primary/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={templatesLoading || !templates.length}
+                    onClick={() => {
+                      setTemplatePickerOpen((open) => !open);
+                      setHoveredTemplateId('');
+                    }}
+                  >
+                    <span className="min-w-0 truncate">{selectedTemplateLabel}</span>
+                    <ChevronDown className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${templatePickerOpen ? 'rotate-180' : ''}`} />
+                  </button>
+                  {templatePickerOpen && (
+                    <div className="absolute left-0 right-0 top-full z-30 mt-2 overflow-hidden rounded-md border border-border bg-card text-card-foreground shadow-xl">
+                      <div
+                        role="listbox"
+                        aria-label="Project templates"
+                        className="max-h-56 overflow-y-auto py-1"
+                        onMouseLeave={() => setHoveredTemplateId('')}
+                      >
+                        {templates.map((template) => {
+                          const selected = template.id === form.projectTemplateId;
+                          return (
+                            <button
+                              key={template.id}
+                              type="button"
+                              role="option"
+                              aria-selected={selected}
+                              className={`flex w-full items-start justify-between gap-3 px-3 py-2 text-left text-sm transition-colors ${
+                                selected ? 'bg-primary/10 text-foreground' : 'hover:bg-muted/50'
+                              }`}
+                              onMouseEnter={() => setHoveredTemplateId(template.id)}
+                              onFocus={() => setHoveredTemplateId(template.id)}
+                              onClick={() => handleSelectTemplate(template)}
+                            >
+                              <span className="min-w-0">
+                                <span className="block truncate font-medium">
+                                  {template.label}
+                                  {template.id === 'default' ? ' (default)' : ''}
+                                </span>
+                                <span className="block truncate text-[11px] text-muted-foreground">{template.id}</span>
+                              </span>
+                              {selected ? <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" /> : null}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div className="border-t border-border/70 bg-muted/20 px-3 py-2">
+                        <p className="text-xs leading-5 text-muted-foreground">
+                          {hoveredTemplate?.description || 'Hover a template to preview its description.'}
+                        </p>
+                      </div>
+                    </div>
                   )}
-                </select>
+                </div>
                 {templatesError ? (
                   <div className="flex items-center justify-between gap-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs leading-5 text-destructive">
                     <span>{templatesError}</span>
@@ -378,6 +761,13 @@ export function Projects() {
                           .then((res) => {
                             const list = res.templates || [];
                             setTemplates(list);
+                            if (!advancedOptionsTouchedRef.current) {
+                              const fallbackTemplate =
+                                list.find((template) => template.id === form.projectTemplateId) ||
+                                list.find((template) => template.id === 'default') ||
+                                list[0];
+                              setAdvancedOptions(advancedOptionsFromTemplate(fallbackTemplate));
+                            }
                             setForm((prev) => {
                               if (prev.projectTemplateId && list.some((template) => template.id === prev.projectTemplateId)) return prev;
                               const fallback = list.find((template) => template.id === 'default') || list[0];
@@ -393,11 +783,120 @@ export function Projects() {
                     </button>
                   </div>
                 ) : null}
-                {selectedTemplate?.description ? (
-                  <div className="rounded-md border border-border/70 bg-muted/30 px-3 py-2 text-xs leading-5 text-muted-foreground">
-                    {selectedTemplate.description}
-                  </div>
-                ) : null}
+                <div className="rounded-md border border-border/70 bg-muted/20">
+                  <button
+                    type="button"
+                    className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left"
+                    aria-expanded={advancedOptionsOpen}
+                    onClick={() => setAdvancedOptionsOpen((open) => !open)}
+                  >
+                    <span className="flex min-w-0 items-center gap-2">
+                      <Settings2 className="h-4 w-4 shrink-0 text-primary" />
+                      <span className="min-w-0">
+                        <span className="block text-sm font-medium">Advanced Options</span>
+                        <span className="block truncate text-xs text-muted-foreground">{advancedOptionsSummary}</span>
+                      </span>
+                    </span>
+                    {advancedOptionsOpen ? (
+                      <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    ) : (
+                      <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    )}
+                  </button>
+                  {advancedOptionsOpen ? (
+                    <div className="space-y-3 border-t border-border/70 px-3 py-3">
+                      <label className="flex items-center justify-between gap-3 rounded-md border border-border/70 bg-background px-3 py-2 text-sm">
+                        <span className="font-medium">Coordinator</span>
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4"
+                          checked={advancedOptions.coordinatorEnabled}
+                          onChange={(e) => markAdvancedOptionsTouched({ coordinatorEnabled: e.target.checked })}
+                        />
+                      </label>
+
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <label className="space-y-1.5">
+                          <span className="text-xs font-medium text-muted-foreground">Coordinator launch</span>
+                          <select
+                            className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+                            value={selectedCoordinatorLaunchMode}
+                            onChange={(e) => handleCoordinatorLaunchModeChange(e.target.value)}
+                          >
+                            {AGENT_LAUNCH_MODE_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+
+                        <label className="space-y-1.5">
+                          <span className="text-xs font-medium text-muted-foreground">Preferred agent type</span>
+                          <select
+                            className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+                            value={selectedPreferredAgentType}
+                            onChange={(e) => markAdvancedOptionsTouched({ preferredAgentType: e.target.value })}
+                          >
+                            {preferredAgentTypeOptions.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+
+                        <label className="space-y-1.5">
+                          <span className="text-xs font-medium text-muted-foreground">Project active agents</span>
+                          <Input
+                            type="number"
+                            min={1}
+                            max={PROJECT_MAX_ACTIVE_AGENTS_CAP}
+                            value={advancedOptions.maxActiveAgents}
+                            onChange={(e) => markAdvancedOptionsTouched({ maxActiveAgents: e.target.value })}
+                            className="h-9"
+                          />
+                        </label>
+
+                        <label className="space-y-1.5">
+                          <span className="text-xs font-medium text-muted-foreground">Active goals</span>
+                          <Input
+                            type="number"
+                            min={1}
+                            max={PROJECT_MAX_ACTIVE_GOALS_CAP}
+                            value={advancedOptions.maxActiveGoals}
+                            onChange={(e) => markAdvancedOptionsTouched({ maxActiveGoals: e.target.value })}
+                            className="h-9"
+                          />
+                        </label>
+
+                        <label className="space-y-1.5">
+                          <span className="text-xs font-medium text-muted-foreground">Coordinator agent cap</span>
+                          <Input
+                            type="number"
+                            min={1}
+                            max={PROJECT_MAX_ACTIVE_AGENTS_CAP}
+                            value={advancedOptions.coordinatorMaxAgents}
+                            onChange={(e) => markAdvancedOptionsTouched({ coordinatorMaxAgents: e.target.value })}
+                            className="h-9"
+                          />
+                        </label>
+
+                        <label className="space-y-1.5">
+                          <span className="text-xs font-medium text-muted-foreground">Dispatches per tick</span>
+                          <Input
+                            type="number"
+                            min={1}
+                            max={20}
+                            value={advancedOptions.maxDispatchesPerTick}
+                            onChange={(e) => markAdvancedOptionsTouched({ maxDispatchesPerTick: e.target.value })}
+                            className="h-9"
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
               </div>
 
               <div className="space-y-2">

@@ -10,6 +10,7 @@ import { GithubAuthGuard } from './guards/github-auth.guard';
 import { GoogleAuthGuard } from './guards/google-auth.guard';
 import { XOAuthService } from './x-oauth.service';
 import { EmailVerificationService } from './email-verification.service';
+import { appendOAuthRedirectParam, resolveOAuthRedirectUrl } from './oauth-redirect';
 
 @ApiTags('auth')
 @Controller('auth')
@@ -21,7 +22,7 @@ export class AuthController {
   ) {}
 
   private getOauthRedirectUrl(redirect?: string) {
-    return redirect || process.env.OAUTH_REDIRECT_URL || 'http://localhost:5173/oauth/callback';
+    return resolveOAuthRedirectUrl(redirect);
   }
 
   @Post('register')
@@ -75,7 +76,7 @@ export class AuthController {
         ? await this.authService.bindGithubIdentity(callbackMode.userId, req.user)
         : await this.authService.oauthLogin(req.user);
     const redirectUrl = this.getOauthRedirectUrl(callbackMode.mode === 'bind' ? callbackMode.redirect : redirect);
-    return res.redirect(`${redirectUrl}?token=${encodeURIComponent(result.access_token)}`);
+    return res.redirect(appendOAuthRedirectParam(redirectUrl, 'token', result.access_token));
   }
 
   @Get('github/bind-url')
@@ -100,7 +101,7 @@ export class AuthController {
   async googleCallback(@Request() req: any, @Res() res: Response, @Query('redirect') redirect?: string) {
     const result = await this.authService.oauthLogin(req.user);
     const redirectUrl = this.getOauthRedirectUrl(redirect);
-    return res.redirect(`${redirectUrl}?token=${encodeURIComponent(result.access_token)}`);
+    return res.redirect(appendOAuthRedirectParam(redirectUrl, 'token', result.access_token));
   }
 
   // X.com OAuth
@@ -123,7 +124,7 @@ export class AuthController {
     const redirectUrl = this.getOauthRedirectUrl(this.xOAuthService.resolveRedirectFromState(state));
     if (error || !code) {
       this.xOAuthService.clearOauthCookies(res);
-      return res.redirect(`${redirectUrl}?error=${encodeURIComponent(error || 'oauth_failed')}`);
+      return res.redirect(appendOAuthRedirectParam(redirectUrl, 'error', error || 'oauth_failed'));
     }
 
     const cookies = this.parseCookies(req.headers?.cookie);
@@ -135,9 +136,9 @@ export class AuthController {
         cookies.agentcraft_x_oauth_nonce,
       );
       const result = await this.authService.oauthLogin(oauthUser);
-      return res.redirect(`${redirectUrl}?token=${encodeURIComponent(result.access_token)}`);
+      return res.redirect(appendOAuthRedirectParam(redirectUrl, 'token', result.access_token));
     } catch (err: any) {
-      return res.redirect(`${redirectUrl}?error=${encodeURIComponent(err?.message || 'oauth_failed')}`);
+      return res.redirect(appendOAuthRedirectParam(redirectUrl, 'error', err?.message || 'oauth_failed'));
     } finally {
       this.xOAuthService.clearOauthCookies(res);
     }

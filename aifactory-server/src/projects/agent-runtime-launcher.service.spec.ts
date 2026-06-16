@@ -289,6 +289,38 @@ describe('AgentRuntimeLauncherService template skill refs', () => {
     expect(prompt).not.toContain('Full body');
     expect(prompt).not.toContain('AIFACTORY_RUNTIME_TOKEN.');
   });
+
+  it('can localize progressive skill mount paths for local CLI runners', async () => {
+    const skillDir = join(root, 'agent-workspace');
+    await mkdir(join(skillDir, 'scripts'), { recursive: true });
+    await writeFile(
+      join(skillDir, 'SKILL.md'),
+      [
+        '---',
+        'name: agent-workspace',
+        'description: Workspace entry skill.',
+        '---',
+        '',
+        'Full body.',
+      ].join('\n'),
+    );
+    await writeFile(join(skillDir, 'scripts', 'project-files.sh'), '# helper');
+
+    const service = new AgentRuntimeLauncherService({
+      get: (key: string) => (key === 'AGENT_WORKSPACE_SKILLS_PATH' ? root : undefined),
+    } as never) as any;
+
+    const prompt = await service.loadSkillPrompt(
+      ['skill://agent-workspace'],
+      'WORKER_AGENT',
+      [],
+      { progressive: true, mountRoot: './skills' },
+    );
+
+    expect(prompt).toContain('Mounted entrypoint: ./skills/agent-workspace/SKILL.md');
+    expect(prompt).toContain('./skills/agent-workspace/scripts/project-files.sh');
+    expect(prompt).not.toContain('/opt/data/skills/agent-workspace');
+  });
 });
 
 describe('AgentRuntimeLauncherService runtime env', () => {
@@ -442,6 +474,19 @@ describe('AgentRuntimeLauncherService local Docker LLM config', () => {
     expect(modelsConfig.providers.agentcraft.models).toContainEqual(
       expect.objectContaining({ id: 'local-model' }),
     );
+  });
+
+  it('writes direct Pi model API URLs for local agent package runs', () => {
+    const modelsConfig = JSON.parse(service.piModelsConfigContents(
+      llmConfig('http://127.0.0.1:38440/v1'),
+      { directModelApi: true },
+    ));
+
+    expect(modelsConfig.providers.agentcraft).toMatchObject({
+      baseUrl: 'http://127.0.0.1:38440/v1',
+      api: 'openai-completions',
+      apiKey: '$AGENTCRAFT_MODEL_API_KEY',
+    });
   });
 
   it('disables Pi retries in generated settings', () => {

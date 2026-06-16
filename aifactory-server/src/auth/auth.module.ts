@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { AuthController } from './auth.controller';
@@ -14,6 +15,7 @@ import { GoogleAuthGuard } from './guards/google-auth.guard';
 import { XOAuthService } from './x-oauth.service';
 import { EmailService } from './email.service';
 import { EmailVerificationService } from './email-verification.service';
+import { resolveJwtSecret } from './jwt-secret';
 
 @Module({
   imports: [
@@ -21,9 +23,13 @@ import { EmailVerificationService } from './email-verification.service';
     WalletModule,
     AvatarModule,
     PassportModule.register({ defaultStrategy: 'jwt' }),
-    JwtModule.register({
-      secret: process.env.JWT_SECRET || 'dev-secret',
-      signOptions: { expiresIn: process.env.JWT_EXPIRES_IN || '7d' },
+    JwtModule.registerAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        secret: resolveJwtSecret(configService.get<string>('JWT_SECRET')),
+        signOptions: { expiresIn: (configService.get<string>('JWT_EXPIRES_IN') || '7d') as any },
+      }),
     }),
   ],
   controllers: [AuthController],

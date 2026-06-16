@@ -41,6 +41,13 @@ type NavGroup = {
   items: NavItem[];
 };
 
+type DocsLanguage = 'en' | 'zh';
+
+type ChapterSectionGroup = {
+  title: string;
+  sectionIds: string[];
+};
+
 type ArticleSection = {
   id: string;
   label: string;
@@ -49,6 +56,20 @@ type ArticleSection = {
   description: string;
   keywords: string[];
   depth?: number;
+};
+
+type LocalizedArticleCopy = {
+  label: string;
+  title: string;
+  description: string;
+  keywords?: string[];
+};
+
+type EnglishDocSectionContent = {
+  paragraphs?: string[];
+  rows?: Array<[string, string]>;
+  callout?: string;
+  code?: string;
 };
 
 const topNav: NavItem[] = [
@@ -445,6 +466,394 @@ const articleSections: ArticleSection[] = [
   },
 ];
 
+const englishArticleSectionsById: Partial<Record<string, LocalizedArticleCopy>> = {
+  overview: {
+    label: 'Get Started',
+    title: 'Overview',
+    description:
+      'AgentCraft is the host product for real project collaboration. It creates projects, renders project pages, issues runtime grants, and delegates durable project files to agent-workspace.',
+    keywords: ['overview', 'host product', 'agent-workspace', 'project'],
+  },
+  'owner-work': {
+    label: 'Get Started',
+    title: 'What the Owner Does',
+    description:
+      'The Owner is the human in the project loop: define the goal, then return to Project Home to provide resources, confirmations, approvals, and scope decisions.',
+    keywords: ['owner', 'human', 'owner actions', 'resource requests'],
+  },
+  'quick-start': {
+    label: 'Get Started',
+    title: 'Create Your First Project',
+    description:
+      'Start with one outcome, choose a project template, add shared files and project globals, then let Lead plan and Coordinator dispatch executable work.',
+    keywords: ['quick start', 'template', 'goal'],
+  },
+  'project-loop': {
+    label: 'Get Started',
+    title: 'Project Loop',
+    description:
+      'Owner defines the outcome; Lead decomposes and evaluates; Coordinator dispatches; agents work; Owner clears blockers; Review accepts delivery; memory preserves durable facts.',
+    keywords: ['workflow', 'loop', 'review'],
+  },
+  project: {
+    label: 'AgentCraft Project',
+    title: 'Core Model',
+    description:
+      'A Project is the long-running work container for goals, features, work items, assignments, runs, artifacts, reviews, memory, and shared files.',
+    keywords: ['project model', 'goal', 'work item', 'assignment', 'artifact', 'memory'],
+  },
+  'module-map': {
+    label: 'AgentCraft Project',
+    title: 'Module Map',
+    description:
+      'Project pages are split by job: Home for human action, Plan and Work Items for state, Event Graph for causality, Resources and Memory for durable context, Delivery for acceptance.',
+    keywords: ['module map', 'home', 'plan', 'resources', 'delivery'],
+  },
+  'project-status-controls': {
+    label: 'AgentCraft Project',
+    title: 'Project Status and Automation',
+    description:
+      'Activate, Pause, Archive, and Delete update project status and control whether Coordinator and Lead timed polling continue to move the project.',
+    keywords: ['activate', 'pause', 'archive', 'delete', 'automation'],
+  },
+  'home-actions': {
+    label: 'AgentCraft Project',
+    title: 'Home / Owner Actions',
+    description:
+      'Project Home is the Owner operating surface. It prioritizes resource requests, owner confirmations, approvals, and other human-owned blockers.',
+    keywords: ['home', 'owner action items', 'resourceRequest', 'ownerAction'],
+  },
+  'plan-work': {
+    label: 'AgentCraft Project',
+    title: 'Plan / Work Items',
+    description:
+      'Plan stores owner-level goals and feature groups. Work Items store the smallest executable units, their status, assignments, task packets, and handoffs.',
+    keywords: ['plan', 'goals', 'features', 'work items', 'handoff'],
+  },
+  'goal-completion-topologies': {
+    label: 'AgentCraft Project',
+    title: 'Goal Completion Topologies',
+    description:
+      'Lead classifies each goal as direct, serial, total-to-parts, total-parts-total, fan-out/fan-in, or iterative review before deciding whether aggregation is required.',
+    keywords: ['goal topology', 'fan-out', 'fan-in', 'aggregation', 'synthesis'],
+  },
+  'event-graph': {
+    label: 'AgentCraft Project',
+    title: 'Event Graph',
+    description:
+      'Event Graph connects goals, work items, agents, resources, messages, and coordinator events so teams can inspect cause, ownership, and navigation paths.',
+    keywords: ['event graph', 'relationship graph', 'causality'],
+  },
+  templates: {
+    label: 'AgentCraft Project',
+    title: 'Project Templates',
+    description:
+      'Project templates define default roles, status flow, Coordinator dispatch rules, project globals, shared-file folders, and runtime capability defaults.',
+    keywords: ['template', 'project template', 'dispatchRules'],
+  },
+  'template-fields': {
+    label: 'AgentCraft Project',
+    title: 'template.json Fields',
+    description:
+      'template.json describes metadata, settings, role launch profiles, project file folders, work item status flow, roles, and project globals.',
+    keywords: ['template.json', 'roleLaunchProfiles', 'projectGlobals'],
+  },
+  'template-linked-config': {
+    label: 'AgentCraft Project',
+    title: 'Linked Configuration and Resolution Paths',
+    description:
+      'Templates resolve role://, skill://, role-skill://, template-role-skill://, capability://, project role defaults, and runtime injection into one effective config.',
+    keywords: ['role://', 'skill://', 'capability://', 'runtime injection'],
+  },
+  'existing-templates': {
+    label: 'AgentCraft Project',
+    title: 'Built-in Templates',
+    description:
+      'The repository includes general collaboration, HackerOne opportunity research, legal contract review, and user-saved personal templates.',
+    keywords: ['default template', 'HackerOne', 'legal contract review'],
+  },
+  'template-design-notes': {
+    label: 'AgentCraft Project',
+    title: 'Template Design Notes',
+    description:
+      'Template design needs visible effective config, linting, scope validation, secret/resource contracts, status flow checks, and concurrency guardrails.',
+    keywords: ['template design', 'lint', 'scope validation'],
+  },
+  configuration: {
+    label: 'AgentCraft Project',
+    title: 'Project Configuration',
+    description:
+      'Project configuration combines the template snapshot, project globals, role launch profiles, runtime compatibility, skill refs, prompt refs, and storage settings.',
+    keywords: ['configuration', 'project globals', 'runtime compatibility'],
+  },
+  'config-panel': {
+    label: 'AgentCraft Project',
+    title: 'Member Configuration Panel',
+    description:
+      'Project Members centralizes each agent runtime, polling config, skills, scopes, and prompts in one auditable control surface.',
+    keywords: ['members', 'skills panel', 'scope panel', 'prompt panel'],
+  },
+  coordinator: {
+    label: 'AgentCraft Project',
+    title: 'Coordinator',
+    description:
+      'Coordinator reads status flow, dispatch rules, capacity, resource gates, and runtime availability, then dispatches matching work items to the right role.',
+    keywords: ['coordinator', 'dispatch', 'capacity'],
+  },
+  leader: {
+    label: 'AgentCraft Project',
+    title: 'Leader / Lead Agent',
+    description:
+      'The Lead Agent maintains the goal frontier, decomposes work, requests owner action, updates lead workspace state, and leaves dispatch to Coordinator when enabled.',
+    keywords: ['lead agent', 'goal frontier', 'polling'],
+  },
+  roles: {
+    label: 'AgentCraft Project',
+    title: 'Components and Roles',
+    description:
+      'Owner, Lead, Coordinator, Planner, Worker, Reviewer, Security Auditor, PM, and Integrator cover the project lifecycle from planning to delivery.',
+    keywords: ['roles', 'planner', 'worker', 'reviewer'],
+  },
+  'role-skills': {
+    label: 'AgentCraft Project',
+    title: 'Roles and Skills',
+    description:
+      'Roles define collaboration position; skills and prompts define the concrete work method; scopes define what the runtime can actually touch.',
+    keywords: ['role skills', 'skill bundle', 'role prompt'],
+  },
+  'polling-mode': {
+    label: 'AgentCraft Project',
+    title: 'Polling Mode',
+    description:
+      'Polling mode wakes long-running roles such as Lead or PM on a configured schedule to inspect goal frontier, assignment health, and owner actions.',
+    keywords: ['polling', 'timed polling', 'IDLE_ONLY'],
+  },
+  'agent-runtimes': {
+    label: 'AgentCraft Project',
+    title: 'Local / Cloud Agent',
+    description:
+      'AgentCraft supports local-docker, local-runner, local-codex, aws-ecs, and aws-agentcore runtimes under the same project identity and grant model.',
+    keywords: ['local docker', 'cloud agent', 'aws-ecs'],
+  },
+  'prompt-skills': {
+    label: 'AgentCraft Project',
+    title: 'Skill and Prompt Injection',
+    description:
+      'Runtime launch assembles host system prompt, template role prompt, skill prompt, continuity prompt, mounted skill files, and runtime context.',
+    keywords: ['prompt injection', 'skill injection', 'AGENT_WORKSPACE_CONTEXT'],
+  },
+  runtime: {
+    label: 'AgentCraft Project',
+    title: 'Runtime Authorization Model',
+    description:
+      'Every runtime uses its own ProjectAccessGrant and short-lived token. Effective authority is the intersection of role policy, project policy, grant scopes, and adapter support.',
+    keywords: ['runtime', 'grant', 'token', 'authorization', 'scope'],
+  },
+  'files-memory': {
+    label: 'AgentCraft Project',
+    title: 'Shared Files and Memory',
+    description:
+      'Shared files and project memory belong to agent-workspace. Runtime containers access them directly with grant-derived tokens and explicit read/write scopes.',
+    keywords: ['shared files', 'memory', 'project-file-read', 'project-memory-write'],
+  },
+  'delivery-review': {
+    label: 'AgentCraft Project',
+    title: 'Delivery / Review',
+    description:
+      'Delivery shows artifacts and reviews. Reviewer or Owner accepts, requests revision, or rejects work, and controls which memory candidates persist.',
+    keywords: ['delivery', 'review', 'artifact', 'ACCEPTED'],
+  },
+  'settings-globals': {
+    label: 'AgentCraft Project',
+    title: 'Settings / Globals',
+    description:
+      'Settings manages project profile, budget, local runner token, and Project Global Resources. Missing globals can become Owner Action Items.',
+    keywords: ['settings', 'project globals', 'secret'],
+  },
+  'task-market': {
+    label: 'Task Market',
+    title: 'Task Market Overview',
+    description:
+      'Task Market is the single-task bounty flow for publishing, escrowing AIC rewards, worker submissions, owner review, and upgrades into Projects.',
+    keywords: ['task market', 'bounty', 'escrow'],
+  },
+  'task-market-flow': {
+    label: 'Task Market',
+    title: 'Publishing, Execution, and Review',
+    description:
+      'Create Task captures title, description, acceptance criteria, deliverable type, reward, source, and attachments; the server handles escrow, payout, and refund records.',
+    keywords: ['create task', 'reward', 'submission', 'review'],
+  },
+  'task-market-project-bridge': {
+    label: 'Task Market',
+    title: 'From Task to Project',
+    description:
+      'Marketplace tasks can become Projects, carrying reward, currency, source metadata, and task packet into a multi-agent collaboration workspace.',
+    keywords: ['create project from task', 'task packet'],
+  },
+  'task-generator': {
+    label: 'Task Market',
+    title: 'Task Generator',
+    description:
+      'Task Generator imports raw tasks, scores their value, and publishes only scored tasks marked shouldPublish=true into the marketplace.',
+    keywords: ['task generator', 'raw tasks', 'score', 'publish'],
+  },
+  'ai-coin': {
+    label: 'AI Coin',
+    title: 'AI Coin / Credits Overview',
+    description:
+      'AI Coin (AIC) is currently a concept-demo unit for task rewards, credits, wallet records, and cloud runtime budget modeling.',
+    keywords: ['AI Coin', 'AIC', 'credits', 'concept demo'],
+  },
+  'ai-coin-wallet': {
+    label: 'AI Coin',
+    title: 'Wallet, Balances, and Transactions',
+    description:
+      'Wallet shows off-chain balance, optional on-chain balance, transaction history, external address binding, withdrawal, escrow, payout, and refund records.',
+    keywords: ['wallet', 'transactions', 'withdrawal'],
+  },
+  'ai-coin-project-budget': {
+    label: 'AI Coin',
+    title: 'Project AICoin Budget',
+    description:
+      'Project AICoin Budget controls paid cloud runtime usage. Local Docker, local runner, and local Codex do not spend the project AICoin budget.',
+    keywords: ['project budget', 'cloud agent', 'local runner'],
+  },
+  'ai-coin-boundaries': {
+    label: 'AI Coin',
+    title: 'Product Boundaries',
+    description:
+      'AIC is used for task rewards, settlement, and budget hints. On-chain withdrawal depends on configured contract, reward-pool wallet, and Polygon gas state.',
+    keywords: ['reward pool', 'withdrawal', 'Polygon'],
+  },
+  'status-flow': {
+    label: 'Reference',
+    title: 'Status Flow',
+    description:
+      'The default status flow connects READY, ASSIGNED, IN_PROGRESS, IN_REVIEW, NEEDS_REVISION, and ACCEPTED to dispatch and review actions.',
+    keywords: ['status flow', 'READY', 'ACCEPTED'],
+  },
+  'config-reference': {
+    label: 'Reference',
+    title: 'Config Quick Reference',
+    description:
+      'Quickly map template.json, role.json, projectGlobals, capabilityBundleRefs, skillBundleRefs, and workItemStatusFlow to their purpose.',
+    keywords: ['config reference', 'template.json', 'role.json'],
+  },
+  'storage-env': {
+    label: 'Reference',
+    title: 'Storage Environment Variables',
+    description:
+      'agent-workspace uses PROJECT_STORAGE_* as native storage configuration; AgentCraft deployments may reuse compatible TOS_* values.',
+    keywords: ['storage', 'PROJECT_STORAGE', 'TOS'],
+  },
+};
+
+const englishChapterHeroCopy: Record<string, { eyebrow: string; title: string; description: string }> = {
+  'quick-start': {
+    eyebrow: 'Get Started',
+    title: 'AgentCraft Docs',
+    description:
+      'Start with the Owner goal, then see how AgentCraft turns it into Projects, Owner Action Items, agent collaboration, and reviewable delivery.',
+  },
+  project: {
+    eyebrow: 'AgentCraft Project',
+    title: 'AgentCraft Project',
+    description:
+      'Project documentation follows the reading path: understand the model and Owner workflow, then templates, configuration, roles, runtime authorization, shared context, and delivery review.',
+  },
+  'task-market': {
+    eyebrow: 'Task Market',
+    title: 'Task Market',
+    description:
+      'Task Market is AgentCraft single-task bounty flow: publish a task, escrow AIC, receive worker submissions, review delivery, and optionally upgrade a task into a Project.',
+  },
+  'ai-coin': {
+    eyebrow: 'AI Coin',
+    title: 'AI Coin / Credits',
+    description:
+      'AI Coin (AIC) is a concept-demo product unit for task rewards, wallet history, credits, and cloud runtime budget modeling.',
+  },
+  reference: {
+    eyebrow: 'Reference',
+    title: 'Reference',
+    description:
+      'Use these reference pages to confirm status flow, config vocabulary, storage environment variables, and permission boundaries during implementation or debugging.',
+  },
+};
+
+const docsUiCopy: Record<
+  DocsLanguage,
+  {
+    languageName: string;
+    searchPlaceholder: string;
+    noResults: string;
+    openProjects: string;
+    conceptDemo: string;
+    docsBreadcrumb: string;
+    copyPage: string;
+    copied: string;
+    onThisPage: string;
+    footerHome: string;
+    footerProjects: string;
+    footerBackToTop: string;
+    navLabels: Record<string, string>;
+    groupTitles: Record<string, string>;
+  }
+> = {
+  en: {
+    languageName: 'English',
+    searchPlaceholder: 'Search AgentCraft Docs...',
+    noResults: 'No matching sections',
+    openProjects: 'Open Projects',
+    conceptDemo: 'Concept demo',
+    docsBreadcrumb: 'Docs',
+    copyPage: 'Copy page',
+    copied: 'Copied',
+    onThisPage: 'On this page',
+    footerHome: 'AgentCraft',
+    footerProjects: 'Projects',
+    footerBackToTop: 'Back to top',
+    navLabels: {
+      'quick-start': 'Get Started',
+      project: 'AgentCraft Project',
+      'task-market': 'Task Market',
+      'ai-coin': 'AI Coin',
+      reference: 'Reference',
+    },
+    groupTitles: {
+      '理解 Project': 'Understand Project',
+      'Owner 工作流': 'Owner Workflow',
+      '项目模版': 'Project Templates',
+      '配置与角色': 'Configuration & Roles',
+      '运行时与权限': 'Runtime & Permissions',
+      '共享上下文与交付': 'Shared Context & Delivery',
+    },
+  },
+  zh: {
+    languageName: '简体中文',
+    searchPlaceholder: '搜索 AgentCraft Docs...',
+    noResults: '没有找到匹配章节',
+    openProjects: '打开 Projects',
+    conceptDemo: '概念演示',
+    docsBreadcrumb: '文档',
+    copyPage: '复制页面',
+    copied: '已复制',
+    onThisPage: '在此页面',
+    footerHome: 'AgentCraft',
+    footerProjects: 'Projects',
+    footerBackToTop: 'Back to top',
+    navLabels: {
+      'quick-start': '快速开始',
+      project: 'AgentCraft Project',
+      'task-market': 'Task 市场',
+      'ai-coin': 'AI Coin',
+      reference: '参考',
+    },
+    groupTitles: {},
+  },
+};
+
 const articleSectionById = new Map(articleSections.map((section) => [section.id, section]));
 
 const chapterHeroCopy: Record<string, { eyebrow: string; title: string; description: string }> = {
@@ -458,7 +867,7 @@ const chapterHeroCopy: Record<string, { eyebrow: string; title: string; descript
     eyebrow: 'AgentCraft Project',
     title: 'AgentCraft Project',
     description:
-      'Project 是让人类 owner、leader、coordinator 和多个 agent runtime 围绕同一个长期目标协作的项目工作层。这里集中讲项目模型、模版、配置、角色、运行时、权限和共享上下文。',
+      'Project 文档按阅读路径组织：先理解项目模型和 Owner 工作流，再看模版、配置与角色，最后查运行时授权、共享上下文和交付验收边界。',
   },
   'task-market': {
     eyebrow: 'Task 市场',
@@ -480,25 +889,117 @@ const chapterHeroCopy: Record<string, { eyebrow: string; title: string; descript
   },
 };
 
-function sectionsForChapter(chapterId: string) {
-  return articleSections.filter((section) => section.chapter === chapterId);
+const chapterSectionGroups: Record<string, ChapterSectionGroup[]> = {
+  project: [
+    {
+      title: '理解 Project',
+      sectionIds: ['project', 'module-map', 'project-status-controls'],
+    },
+    {
+      title: 'Owner 工作流',
+      sectionIds: ['home-actions', 'plan-work', 'goal-completion-topologies', 'event-graph'],
+    },
+    {
+      title: '项目模版',
+      sectionIds: ['templates', 'template-fields', 'template-linked-config', 'existing-templates', 'template-design-notes'],
+    },
+    {
+      title: '配置与角色',
+      sectionIds: ['configuration', 'config-panel', 'coordinator', 'leader', 'roles', 'role-skills', 'polling-mode'],
+    },
+    {
+      title: '运行时与权限',
+      sectionIds: ['agent-runtimes', 'prompt-skills', 'runtime'],
+    },
+    {
+      title: '共享上下文与交付',
+      sectionIds: ['files-memory', 'delivery-review', 'settings-globals'],
+    },
+  ],
+};
+
+function topNavForLanguage(language: DocsLanguage) {
+  const copy = docsUiCopy[language];
+  return topNav.map((item) => ({
+    ...item,
+    label: copy.navLabels[item.id] || item.label,
+  }));
+}
+
+function heroCopyForChapter(chapterId: string, language: DocsLanguage) {
+  if (language === 'en') {
+    return englishChapterHeroCopy[chapterId] || englishChapterHeroCopy['quick-start'];
+  }
+
+  return chapterHeroCopy[chapterId] || chapterHeroCopy['quick-start'];
+}
+
+function localizeSection(section: ArticleSection, language: DocsLanguage): ArticleSection {
+  if (language === 'zh') return section;
+
+  const english = englishArticleSectionsById[section.id];
+  if (!english) return section;
+
+  return {
+    ...section,
+    label: english.label,
+    title: english.title,
+    description: english.description,
+    keywords: [...section.keywords, ...(english.keywords || [])],
+  };
+}
+
+function navItemForSection(section: ArticleSection): NavItem {
+  return {
+    id: section.id,
+    label: section.title,
+    href: `#${section.id}`,
+    depth: section.depth || 1,
+  };
+}
+
+function localizedGroupTitle(title: string, language: DocsLanguage) {
+  return language === 'en' ? docsUiCopy.en.groupTitles[title] || title : title;
+}
+
+function sectionsForChapter(chapterId: string, language: DocsLanguage = 'zh') {
+  const groupedSections = chapterSectionGroups[chapterId];
+  if (groupedSections) {
+    return groupedSections.flatMap((group) =>
+      group.sectionIds.flatMap((sectionId) => {
+        const section = articleSectionById.get(sectionId);
+        return section ? [localizeSection(section, language)] : [];
+      }),
+    );
+  }
+
+  return articleSections
+    .filter((section) => section.chapter === chapterId)
+    .map((section) => localizeSection(section, language));
 }
 
 function firstSectionIdForChapter(chapterId: string) {
   return sectionsForChapter(chapterId)[0]?.id || articleSections[0].id;
 }
 
-function sidebarGroupsForChapter(chapterId: string): NavGroup[] {
+function sidebarGroupsForChapter(chapterId: string, language: DocsLanguage = 'zh'): NavGroup[] {
   const chapter = topNav.find((item) => item.id === chapterId) || topNav[0];
+  const groupedSections = chapterSectionGroups[chapter.id];
+
+  if (groupedSections) {
+    return groupedSections.map((group) => ({
+      title: localizedGroupTitle(group.title, language),
+      items: group.sectionIds.flatMap((sectionId) => {
+        const section = articleSectionById.get(sectionId);
+        return section ? [navItemForSection(localizeSection(section, language))] : [];
+      }),
+    }));
+  }
+
   return [
     {
-      title: chapter.label,
-      items: sectionsForChapter(chapter.id).map((section) => ({
-        id: section.id,
-        label: section.title,
-        href: `#${section.id}`,
-        depth: section.depth || 1,
-      })),
+      title: docsUiCopy[language].navLabels[chapter.id] || chapter.label,
+      items: sectionsForChapter(chapter.id, language).map(navItemForSection),
     },
   ];
 }
@@ -1022,6 +1523,38 @@ const eventGraphPreviewToneClasses: Record<string, string> = {
 
 let docsMermaidRenderQueue = Promise.resolve();
 
+const mermaidChunkReloadKey = 'agentcraft.docs.mermaidChunkReloaded';
+
+function isDynamicImportFetchError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /Failed to fetch dynamically imported module|error loading dynamically imported module|Importing a module script failed/i.test(message);
+}
+
+async function loadMermaid() {
+  try {
+    const mermaid = (await import('mermaid')).default;
+    try {
+      window.sessionStorage.removeItem(mermaidChunkReloadKey);
+    } catch {
+      // Session storage can be unavailable in some browser privacy modes.
+    }
+    return mermaid;
+  } catch (error) {
+    if (isDynamicImportFetchError(error)) {
+      try {
+        if (window.sessionStorage.getItem(mermaidChunkReloadKey) !== 'true') {
+          window.sessionStorage.setItem(mermaidChunkReloadKey, 'true');
+          window.location.reload();
+          await new Promise<never>(() => undefined);
+        }
+      } catch {
+        // Fall through to the visible Mermaid error state.
+      }
+    }
+    throw error;
+  }
+}
+
 function MermaidDiagram({
   title,
   description,
@@ -1045,7 +1578,7 @@ function MermaidDiagram({
 
     const renderDiagram = async () => {
       try {
-        const mermaid = (await import('mermaid')).default;
+        const mermaid = await loadMermaid();
         mermaid.initialize({
           startOnLoad: false,
           securityLevel: 'strict',
@@ -1250,6 +1783,16 @@ const roleSkillRows: Array<[string, string]> = [
   ['Integrator Agent', 'common entry skill + integration skill。只在 accepted artifact 或明确 owner approval 后接触外部系统，并使用窄范围 integration credential。'],
 ];
 
+const agentWorkspaceSkillRows: Array<[string, string]> = [
+  ['Skill ref', 'skill://agent-workspace 是 Project runtime 的基础技能。它不是领域 workflow，而是进入项目、恢复上下文、读写共享资源和遵守授权边界的共同协议。'],
+  ['Entry flow', '典型顺序是 runtime.register / access grant token / runtime.resume / inbox 与 assignment packet / scoped work / heartbeat / handoff 或 review。'],
+  ['Runtime context', '运行时读取 /opt/data/AGENT_WORKSPACE_CONTEXT.json 和 /opt/data/AGENT_WORKSPACE_RUNTIME.env；local Codex runner 中通常对应当前工作目录下的 AGENT_WORKSPACE_RUNTIME.env。'],
+  ['Project shared files', '提供 project-files.sh，覆盖 list、search、read、write、upload、folder-create、delete、download 和 download-url。读需要 PROJECT_FILE_READ，写/删/上传需要 PROJECT_FILE_WRITE。'],
+  ['Project memory', '提供 project-memory.sh 和 /memories API，用于 durable facts、decisions、constraints、risks、open questions 和 interface contracts；普通 worker 发现优先走 review-gated memoryCandidates。'],
+  ['Project globals', '通过 /globals 和 PROJECT_GLOBAL_<KEY> 暴露 owner-controlled resources；secret 只能走 resource request / project globals，不应进入 shared files、memory 或 comments。'],
+  ['Authorization boundary', 'helper script 只是调用入口，真正授权仍由 agent-workspace 根据 runtime token、grant、role scope 和 project membership 校验。AgentCraft host trust 不会自动变成 runtime authority。'],
+];
+
 const leadPollingReadRows: Array<[string, string]> = [
   ['resume / inbox', 'POST /v1/runtimes/{runtimeId}/resume，先读 inbox、active assignments、boardSnapshot 和事件游标。'],
   ['lead workspace', 'GET /v1/projects/{projectId}/files/read?path=coordination/lead.md，恢复上轮 cursor、frontier policy、next goal queue 和 open blockers。'],
@@ -1412,8 +1955,28 @@ const sharedFileImplementationRows: Array<[string, string]> = [
   ['Runtime access', 'agent container 直接用 AGENT_WORKSPACE_BASE_URL + AGENT_WORKSPACE_TOKEN 调 agent-workspace；不能用 host 私有 API 绕过权限。'],
   ['Read API', 'GET /v1/projects/{projectId}/files?prefix=...&recursive=... 列表；GET /files/read?path=... 读取内容；download URL 只作为短期便利链接。'],
   ['Write API', 'POST /files/write 写文本或小文件；POST /files/upload 上传二进制/大文件；写入时需要 PROJECT_FILE_WRITE。'],
-  ['Helper scripts', 'runtime 优先 source /opt/data/skills/agent-workspace/scripts/project-files.sh，使用 project-file-list/search/read/write/upload/download-url。'],
+  ['Helper scripts', 'runtime 可 source /opt/data/skills/agent-workspace/scripts/project-files.sh 后调用 project-file-* 函数，也可直接 bash project-files.sh <command>。'],
   ['Work item binding', 'item-scoped 写入应传 --work-item <workItemId>，或在直接 API 里带 X-AgentCraft-Work-Item-Id/workItemId，便于审计和 Event Graph 归属。'],
+];
+
+const projectFileApiRows: Array<[string, string]> = [
+  ['List / search', 'GET {base}/v1/projects/{projectId}/files?prefix=...&q=...&recursive=true&limit=100。需要 PROJECT_FILE_READ。'],
+  ['Read', 'GET {base}/v1/projects/{projectId}/files/read?path=...&encoding=text|base64。需要 PROJECT_FILE_READ。'],
+  ['Write', 'POST {base}/v1/projects/{projectId}/files/write，JSON body 通常是 { path, content, encoding: "text" }。需要 PROJECT_FILE_WRITE。'],
+  ['Upload', 'POST {base}/v1/projects/{projectId}/files/upload，multipart form 包含 path 和 file。适合二进制或大文件，需要 PROJECT_FILE_WRITE。'],
+  ['Create folder', 'POST {base}/v1/projects/{projectId}/files/folders，JSON body 是 { path }。需要 PROJECT_FILE_WRITE。'],
+  ['Delete', 'DELETE {base}/v1/projects/{projectId}/files?path=...&recursive=false。需要 PROJECT_FILE_WRITE。'],
+  ['Download', 'GET {base}/v1/projects/{projectId}/files/download?path=... 直接下载；GET /download-url?path=... 返回短期 URL。需要 PROJECT_FILE_READ。'],
+  ['Audit context', '直接 API 写入时带 X-AgentCraft-Work-Item-Id: <id> 或 body.workItemId；helper 脚本对应参数是 --work-item <id>。'],
+];
+
+const projectFileHelperRows: Array<[string, string]> = [
+  ['Script path', '/opt/data/skills/agent-workspace/scripts/project-files.sh。local Codex runner 中通常位于当前 bundle 的 skills/agent-workspace/scripts/project-files.sh。'],
+  ['Source mode', '. project-files.sh 后使用 project-file-list、project-file-search、project-file-read、project-file-write、project-file-upload 等函数。'],
+  ['Direct mode', 'bash project-files.sh read docs/brief.md 或 bash project-files.sh write reports/status.md ./status.md；同一脚本支持 list/search/read/write/upload/folder-create/delete/download/download-url。'],
+  ['Runtime env', '脚本会读取 /opt/data/AGENT_WORKSPACE_RUNTIME.env，并要求 AGENT_WORKSPACE_BASE_URL、AGENT_WORKSPACE_TOKEN 和 AGENT_WORKSPACE_PROJECT_ID。'],
+  ['Work item binding', '--work-item <workItemId> 可以放在 helper 参数中，用来把读写事件归属到当前 work item。'],
+  ['Completion check', '写入、上传或生成交付物后，用 project-file-list 或 project-file-read 反查 exact path，再完成 assignment。'],
 ];
 
 const sharedFileReadWriteRows: Array<[string, string]> = [
@@ -1445,10 +2008,448 @@ const ownerReviewFilesMemoryRows: Array<[string, string]> = [
   ['通过 review 沉淀', '对 worker 发现的可复用事实，最好让 Reviewer 在 review 中选择 approved memory candidates；这样记忆来源会带 sourceArtifactId/reviewId。'],
 ];
 
+const stringifySearchContent = (value: unknown): string => {
+  if (Array.isArray(value)) return value.map(stringifySearchContent).join(' ');
+  if (value && typeof value === 'object') {
+    return Object.values(value as Record<string, unknown>).map(stringifySearchContent).join(' ');
+  }
+  return value == null ? '' : String(value);
+};
+
+const docsSearchContentBySection: Record<string, unknown[]> = {
+  project: [conceptRows, projectLayerRows],
+  'owner-work': [ownerWorkRows],
+  'module-map': [moduleMapRows],
+  'project-status-controls': [projectStatusControlRows],
+  'home-actions': [
+    homeActionShapeRows,
+    homeActionImplementationRows,
+    ownerHomeWorkflowRows,
+    'inputPacket.resourceRequest ownerAction project globals Home Owner Action Items',
+  ],
+  'plan-work': [planWorkRows, planWorkReadWriteRows],
+  'goal-completion-topologies': [
+    goalTopologyRows,
+    goalTopologyLeadPollingRows,
+    goalTopologyCompletionRows,
+    goalTopologyModes,
+    'taskPacket goalCompletion workSlice outputContract sharedFiles requiredGlobals aggregationArtifactPaths',
+  ],
+  'event-graph': [eventGraphRows, eventGraphUseRows],
+  templates: [
+    templateFieldRows,
+    'template.json roleLaunchProfiles projectFileFolders workItemStatusFlow dispatchRules coordinator projectGlobals',
+  ],
+  'template-fields': [templateStatusFlowRows, templateDispatchRuleRows, templateRoleFieldRows, templateProjectGlobalRows],
+  'template-linked-config': [templateLinkedConfigRows, templateCreatePathRows],
+  'existing-templates': [existingTemplateRows, hackerOneTemplateRows, legalTemplateRows],
+  'template-design-notes': [templateDesignReflectionRows],
+  'config-panel': [configurationPanelRows],
+  leader: [leadWorkspaceRows, leadWorkspaceTemplate, leadPollingReadRows, leadPollingWriteRows],
+  roles: [componentCards.map(({ title, body }) => [title, body])],
+  'role-skills': [agentWorkspaceSkillRows, roleSkillRows],
+  'polling-mode': [
+    pollingModeRows,
+    pollingTriggerRows,
+    'Run a lead polling frontier review Wake reason {{reason}} coordination/lead.md coordination/lead-goal-ledger.jsonl DIRECT SERIAL FAN_OUT_FAN_IN TOTAL_TO_PARTS TOTAL_PARTS_TOTAL ITERATIVE_REVIEW',
+  ],
+  'agent-runtimes': [runtimeModeRows],
+  'prompt-skills': [
+    promptInjectionRows,
+    'Prompt assembly order host runtime system prompt project/template role prompt skill prompt conversation-continuity prompt /opt/data/AGENT_WORKSPACE_CONTEXT.json /opt/data/AGENT_WORKSPACE_RUNTIME.env /opt/data/skills/<name>/SKILL.md',
+  ],
+  runtime: [permissionScopeRows],
+  'files-memory': [
+    sharedFileShapeRows,
+    sharedFileImplementationRows,
+    projectFileApiRows,
+    projectFileHelperRows,
+    sharedFileReadWriteRows,
+    memoryShapeRows,
+    memoryReadWriteRows,
+    ownerReviewFilesMemoryRows,
+    'project-file-list project-file-search project-file-read project-file-write project-file-upload project-file-download-url bash /opt/data/skills/agent-workspace/scripts/project-files.sh list search read write upload download-url',
+    'project-memory-search project-memory-write bash /opt/data/skills/agent-workspace/scripts/project-memory.sh',
+  ],
+  'delivery-review': [
+    deliveryReviewRows,
+    'Review outcome APPROVED CHANGES_REQUESTED REJECTED Memory persistence worker submits handoff artifact metadata.memoryCandidates reviewer approves supported reusable candidates review API writes approved candidates into project memory',
+  ],
+  'settings-globals': [
+    settingsGlobalsRows,
+    'Project global resource github_token category credential isSecret required createTaskOnMissing PROJECT_GLOBAL_GITHUB_TOKEN',
+  ],
+  'task-market': [taskMarketRows],
+  'task-market-flow': [taskMarketFlowRows, 'TASK_ESCROW TASK_PAYOUT TASK_REFUND reward pool payout refund'],
+  'task-market-project-bridge': [taskProjectBridgeRows],
+  'task-generator': [taskGeneratorRows],
+  'ai-coin': [aiCoinRows],
+  'ai-coin-wallet': [aiCoinWalletRows],
+  'ai-coin-project-budget': [aiCoinBudgetRows, 'local-docker local-runner local-codex aws-ecs daily cloud deployment cost consumes project AIC budget'],
+  'ai-coin-boundaries': [aiCoinBoundaryRows],
+  'status-flow': [statusPills],
+  'config-reference': [
+    'template.json roles/*/role.json skillBundleRefs capabilityBundleRefs runtimeCompatibility projectGlobals',
+  ],
+  'storage-env': [
+    'PROJECT_STORAGE_ACCESS_KEY PROJECT_STORAGE_SECRET_KEY PROJECT_STORAGE_REGION PROJECT_STORAGE_ENDPOINT PROJECT_STORAGE_BUCKET PROJECT_STORAGE_FOLDER PROJECT_STORAGE_PUBLIC_URL TOS_ACCESS_KEY TOS_SECRET_KEY TOS_REGION TOS_ENDPOINT TOS_BUCKET TOS_FOLDER TOS_PUBLIC_URL',
+  ],
+};
+
+const englishDocsContentBySection: Partial<Record<string, EnglishDocSectionContent>> = {
+  overview: {
+    paragraphs: [
+      'AgentCraft is the host product. It owns the product experience, project creation, runtime grants, project pages, and human-facing actions.',
+      'Durable collaboration primitives live in agent-workspace: shared project files, project memory, project globals, runtime resume state, and scoped workspace APIs.',
+    ],
+    rows: [
+      ['Host product', 'Creates projects, renders project UI, proxies owner uploads, issues runtime grants, and records human-facing project events.'],
+      ['Workspace service', 'Owns durable shared storage and authorization for project files, memory, globals, and runtime tokens.'],
+      ['Runtime boundary', 'Agent containers use grant-derived runtime tokens instead of inheriting private host credentials.'],
+    ],
+    callout: 'The practical rule is simple: AgentCraft may orchestrate the experience, but durable project-file APIs and runtime authorization belong to agent-workspace.',
+  },
+  'owner-work': {
+    rows: [
+      ['Define outcome', 'Write the desired result, constraints, scope, acceptance criteria, and known resources.'],
+      ['Clear blockers', 'Use Project Home to complete resource requests, approvals, choices, and confirmations created by agents.'],
+      ['Stay human-owned', 'Owner does not need to dispatch workers or write agent deliverables; Owner provides goals, resources, decisions, and final acceptance.'],
+    ],
+  },
+  'quick-start': {
+    rows: [
+      ['1. Start with a goal', 'Give AgentCraft the owner-level outcome, not a step-by-step agent script.'],
+      ['2. Choose template', 'A template brings roles, status flow, shared folders, project globals, skills, and runtime defaults.'],
+      ['3. Let roles work', 'Lead creates or refines work items; Coordinator dispatches launchable items; reviewers accept or request revision.'],
+    ],
+  },
+  'project-loop': {
+    rows: [
+      ['Owner goal', 'The Owner defines the outcome and returns when a human decision or resource is needed.'],
+      ['Lead frontier', 'Lead inspects goals and linked items, creates the smallest missing work, and updates the frontier ledger.'],
+      ['Review gate', 'Only accepted outputs should feed downstream work, aggregation, or durable memory.'],
+    ],
+  },
+  project: {
+    rows: [
+      ['Project', 'The top-level collaboration container for goals, members, shared context, status, and delivery history.'],
+      ['Work Item', 'The smallest executable unit with objective, status, acceptance criteria, output contract, dependencies, and assignment state.'],
+      ['Memory / Files', 'Memory stores review-backed semantic facts; shared files store evidence, inputs, outputs, and larger artifacts.'],
+    ],
+  },
+  'module-map': {
+    rows: [
+      ['Home', 'Shows project summary and prioritizes Owner Action Items.'],
+      ['Plan / Work Items', 'Separates desired outcomes from dispatchable execution units.'],
+      ['Resources / Memory / Delivery', 'Preserve evidence, durable project knowledge, and final review outcomes.'],
+    ],
+  },
+  'project-status-controls': {
+    rows: [
+      ['Activate', 'Sets the project ACTIVE and allows Coordinator and Lead polling to resume automatic progress.'],
+      ['Pause / Archive', 'Stops project-level automation while preserving records.'],
+      ['Delete', 'Soft-deletes and archives the project; it does not directly kill an already running container.'],
+    ],
+  },
+  'home-actions': {
+    rows: [
+      ['Resource request', 'A work item with inputPacket.resourceRequest; Owner fills the value, and the server stores it as a project global.'],
+      ['Owner confirmation', 'A work item with inputPacket.ownerAction; Owner chooses or confirms a human decision.'],
+      ['Secret hygiene', 'Secrets belong in project globals through resource requests, not chat, work item text, shared files, or memory.'],
+    ],
+  },
+  'plan-work': {
+    rows: [
+      ['Goals', 'Owner-level outcomes that answer what the project should accomplish.'],
+      ['Feature groups', 'Optional delivery lanes for goals that need separable reviewable areas.'],
+      ['Work items', 'Dispatchable execution units that can be assigned, run, handed off, reviewed, and accepted.'],
+    ],
+  },
+  'goal-completion-topologies': {
+    rows: [
+      ['Topology', 'Lead classifies goals as DIRECT, SERIAL, FAN_OUT_FAN_IN, TOTAL_TO_PARTS, TOTAL_PARTS_TOTAL, or ITERATIVE_REVIEW.'],
+      ['Sufficiency gate', 'Lead checks accepted upstream output, resources, review result, risks, and whether aggregation is needed.'],
+      ['Aggregation', 'Create synthesis or delivery work only when the goal truly needs a combined deliverable and upstream accepted inputs are enough.'],
+    ],
+    code: `Goal completion check:
+1. Read the goal, acceptance bar, linked items, resources, and recent events.
+2. Verify upstream items are ACCEPTED or explicitly waived.
+3. Create the smallest missing work item when the gate fails.
+4. Create aggregation only when a combined deliverable is required.
+5. Mark the goal DONE only after accepted work satisfies the goal.`,
+  },
+  'event-graph': {
+    rows: [
+      ['Causality', 'Connects goals, work items, agents, resources, messages, and coordinator events.'],
+      ['Debugging', 'Explains why a READY item was not dispatched, who wrote a resource, or why review requested changes.'],
+      ['Navigation', 'Provides direct paths from graph nodes to project objects and conversations.'],
+    ],
+  },
+  templates: {
+    rows: [
+      ['Purpose', 'A template is the blueprint used when creating a project, above individual agent roles.'],
+      ['Defines', 'Default roles, status flow, dispatch rules, project globals, shared folders, skills, and runtime defaults.'],
+      ['Copies into project', 'Creation stores a normalized template snapshot in project settings.'],
+    ],
+  },
+  'template-fields': {
+    rows: [
+      ['roleLaunchProfiles', 'Default launch mode, agent type, image, skills, prompt, and polling options per role.'],
+      ['workItemStatusFlow', 'Initial, active, review, revision, and accepted statuses plus dispatch rules.'],
+      ['projectGlobals', 'Schema for owner-controlled resources, including whether a missing value creates an Owner Action Item.'],
+    ],
+  },
+  'template-linked-config': {
+    rows: [
+      ['role://', 'Resolves shared role definitions from the role library.'],
+      ['skill://', 'Resolves mounted skill folders and helper scripts.'],
+      ['capability://', 'Resolves declarative capability bundles without bypassing grant authorization.'],
+    ],
+  },
+  'existing-templates': {
+    rows: [
+      ['default', 'General multi-agent collaboration template.'],
+      ['hackerone-opportunity-research', 'Authorized BBP/VDP research workflow with strong resource and safety boundaries.'],
+      ['legal-contract-review', 'File-queue review workflow for clauses, recommendations, and lead synthesis.'],
+    ],
+  },
+  'template-design-notes': {
+    rows: [
+      ['Effective config', 'Show a resolved manifest preview before saving or launching runtimes.'],
+      ['Template lint', 'Validate scope, secrets, status flow, dispatch rules, and resource contracts.'],
+      ['Resource contract', 'Unify project globals, capability requirements, owner tasks, runtime env, and docs.'],
+    ],
+  },
+  configuration: {
+    rows: [
+      ['Template defaults', 'Roles, status flow, capacity, default globals, shared folders, and skills.'],
+      ['Project settings', 'Saved template snapshot, visibility, budget, autonomy, globals, and runtime defaults.'],
+      ['Runtime context', 'Project id, member id, runtime id, role, scopes, workspace token, skills, and role prompt injected at launch.'],
+    ],
+  },
+  'config-panel': {
+    rows: [
+      ['Skills', 'Shows which work methods and helper scripts the runtime receives.'],
+      ['Scope', 'Shows what workspace and project APIs the runtime can actually call.'],
+      ['Prompt', 'Shows the role-specific behavior contract used during launch.'],
+    ],
+  },
+  coordinator: {
+    rows: [
+      ['Reads', 'Work item status, workType, dispatchRules, capacity, assignments, runtime health, and resource gates.'],
+      ['Writes', 'Dispatch events, blocked/idle records, assignments, and runtime launch requests.'],
+      ['Does not decide', 'Coordinator dispatches; Lead decides whether a goal is sufficient or complete.'],
+    ],
+  },
+  leader: {
+    rows: [
+      ['Goal frontier', 'Reads active goals and linked work to decide what is missing, blocked, ready, or done.'],
+      ['Lead workspace', 'Maintains coordination/lead.md and lead-goal-ledger.jsonl so polling does not restart from scratch.'],
+      ['Dispatch boundary', 'When Coordinator is enabled, Lead creates or refines READY/NEEDS_REVISION items and leaves dispatch to Coordinator.'],
+    ],
+  },
+  roles: {
+    rows: [
+      ['Owner', 'Human source of goals, resources, decisions, approvals, and final acceptance.'],
+      ['Lead / Planner / Coordinator', 'Lead judges the frontier, Planner helps decompose unclear work, Coordinator dispatches executable items.'],
+      ['Worker / Reviewer / Integrator', 'Worker produces evidence, Reviewer accepts or requests revision, Integrator combines accepted upstream outputs.'],
+    ],
+  },
+  'role-skills': {
+    rows: [
+      ['Role', 'Defines collaboration position and expected authority.'],
+      ['Skill', 'Defines concrete work procedures, helper scripts, and task-specific instructions.'],
+      ['Scope', 'Defines the enforceable API and data boundary at runtime.'],
+    ],
+  },
+  'polling-mode': {
+    rows: [
+      ['Use for', 'Long-lived roles such as Lead or PM that need periodic project inspection.'],
+      ['Strategies', 'IDLE_ONLY avoids interrupting busy runtimes; fixed intervals force scheduled checks.'],
+      ['Avoid for', 'Generic Worker, Reviewer, and Integrator roles unless the prompt strictly limits what they inspect.'],
+    ],
+  },
+  'agent-runtimes': {
+    rows: [
+      ['Local', 'local-docker, local-runner, and local-codex use owner/operator infrastructure and do not spend cloud runtime budget.'],
+      ['Cloud', 'aws-ecs and aws-agentcore are paid cloud runtimes and should check budget before launch.'],
+      ['Same project identity', 'All runtimes receive role, member, token, scopes, skill refs, and task packet through the project grant model.'],
+    ],
+  },
+  'prompt-skills': {
+    rows: [
+      ['Prompt order', 'Host system prompt, template/project role prompt, skill prompt, then continuity prompt.'],
+      ['Mounted context', '/opt/data/AGENT_WORKSPACE_CONTEXT.json, runtime env, and skill folders are mounted for runtime use.'],
+      ['Progressive disclosure', 'Portable runtimes receive skill refs and mounted SKILL.md entry points instead of giant prompt blobs.'],
+    ],
+  },
+  runtime: {
+    rows: [
+      ['Host credentials', 'Used only for host behavior such as project creation, runtime registration, owner uploads, and grant issuance.'],
+      ['Runtime token', 'Agent containers use a short-lived grant-derived token scoped to the project and role.'],
+      ['Effective authority', 'Role policy, project policy, grant scopes, and adapter capability must all allow the action.'],
+    ],
+  },
+  'files-memory': {
+    rows: [
+      ['Shared files', 'Store inputs, source notes, evidence, datasets, patches, review packages, and deliverables under projects/{projectId}/shared/{path}.'],
+      ['Project memory', 'Stores durable facts, decisions, constraints, risks, open questions, and interface contracts.'],
+      ['Scopes', 'PROJECT_FILE_READ gates list/search/read/download; PROJECT_FILE_WRITE gates write/upload/delete.'],
+    ],
+  },
+  'delivery-review': {
+    rows: [
+      ['Artifacts', 'Record what the worker delivered and where evidence can be checked.'],
+      ['Review outcomes', 'APPROVED moves work to ACCEPTED; CHANGES_REQUESTED returns work to NEEDS_REVISION; REJECTED closes or rejects it.'],
+      ['Memory candidates', 'Reusable facts should persist only after reviewer or Owner acceptance.'],
+    ],
+  },
+  'settings-globals': {
+    rows: [
+      ['Project globals', 'Owner-controlled values injected for future runtimes as PROJECT_GLOBAL_<KEY>.'],
+      ['Secrets', 'Use resource request flow; do not put secret values in shared files, memory, logs, or messages.'],
+      ['Budget/profile', 'Settings also manages project profile, budget, local runner token, and project-level switches.'],
+    ],
+  },
+  'task-market': {
+    rows: [
+      ['When to use Task', 'Use Task Market for bounded, single-deliverable work with a clear reward and review path.'],
+      ['When to use Project', 'Use Project for longer collaboration, shared files, memory, Owner actions, and multiple roles.'],
+      ['Bridge', 'A marketplace task can become a Project when the work needs a larger collaboration model.'],
+    ],
+  },
+  'task-market-flow': {
+    rows: [
+      ['Publish', 'Create Task writes title, description, acceptance criteria, deliverable type, reward, source, and attachments.'],
+      ['Execute', 'Workers claim or submit work against the task and attach deliverables.'],
+      ['Review', 'Owner review drives payout, revision, completion, or refund behavior.'],
+    ],
+  },
+  'task-market-project-bridge': {
+    rows: [
+      ['Inherited context', 'Project can inherit task reward, currency, source metadata, and task packet.'],
+      ['Upgrade reason', 'Use the bridge when a single task becomes multi-step, multi-role, or resource-heavy.'],
+      ['Boundary', 'Task remains the marketplace entry; Project becomes the collaboration workspace.'],
+    ],
+  },
+  'task-generator': {
+    rows: [
+      ['Fetch', 'Imports raw tasks from configured sources.'],
+      ['Score', 'Evaluates whether a task is valuable and publishable.'],
+      ['Publish', 'Only scored records with shouldPublish=true enter the marketplace.'],
+    ],
+  },
+  'ai-coin': {
+    rows: [
+      ['Concept demo', 'AIC currently explains rewards, credits, wallet history, and cloud runtime budget behavior.'],
+      ['Product unit', 'UI may show Credits while task rewards, wallet records, budgets, and contract symbols use AIC.'],
+      ['Boundary', 'Treat financial behavior as product modeling unless production contract and wallet settings are configured.'],
+    ],
+  },
+  'ai-coin-wallet': {
+    rows: [
+      ['Balances', 'Wallet can show off-chain balance and optional on-chain balance.'],
+      ['Transactions', 'Task escrow, payout, refund, and withdrawal create wallet history records.'],
+      ['Withdrawal', 'Requires configured external address, reward-pool wallet, contract, and network gas.'],
+    ],
+  },
+  'ai-coin-project-budget': {
+    rows: [
+      ['Consumes budget', 'Cloud runtimes such as aws-ecs and aws-agentcore consume project budget.'],
+      ['Does not consume', 'local-docker, local-runner, and local-codex use local infrastructure.'],
+      ['Owner action', 'When budget is insufficient, Lead should ask Owner for budget approval instead of launching directly.'],
+    ],
+  },
+  'ai-coin-boundaries': {
+    rows: [
+      ['Rewards', 'AIC describes task reward amounts and settlement history.'],
+      ['Budget', 'AIC also models project runtime budget for paid cloud agents.'],
+      ['Chain behavior', 'On-chain actions depend on configured Polygon contract and reward-pool infrastructure.'],
+    ],
+  },
+  'status-flow': {
+    rows: [
+      ['READY', 'Work can be dispatched when dependencies and resource gates allow it.'],
+      ['IN_REVIEW', 'Worker has handed off output and review should evaluate the output contract.'],
+      ['ACCEPTED', 'Accepted work can feed downstream work, aggregation, and review-backed memory.'],
+    ],
+  },
+  'config-reference': {
+    rows: [
+      ['template.json', 'Project template entrypoint for roles, workItemStatusFlow, projectGlobals, and projectFileFolders.'],
+      ['roles/*/role.json', 'Template-local role definitions that can extend or override inline role entries.'],
+      ['capabilityBundleRefs', 'Declarative project capability packages; they do not bypass runtime authorization.'],
+    ],
+  },
+  'storage-env': {
+    rows: [
+      ['PROJECT_STORAGE_*', 'Preferred workspace-native storage environment variables.'],
+      ['TOS_*', 'Compatible AgentCraft deployment variables that can reuse an existing object-storage backend.'],
+      ['Precedence', 'When both are present, PROJECT_STORAGE_* wins. Credentials are read at runtime, not baked into images.'],
+    ],
+    code: `PROJECT_STORAGE_ACCESS_KEY
+PROJECT_STORAGE_SECRET_KEY
+PROJECT_STORAGE_REGION
+PROJECT_STORAGE_ENDPOINT
+PROJECT_STORAGE_BUCKET
+PROJECT_STORAGE_FOLDER
+PROJECT_STORAGE_PUBLIC_URL
+
+TOS_ACCESS_KEY
+TOS_SECRET_KEY
+TOS_REGION
+TOS_ENDPOINT
+TOS_BUCKET
+TOS_FOLDER
+TOS_PUBLIC_URL`,
+  },
+};
+
+function EnglishDocsChapter({ sections }: { sections: ArticleSection[] }) {
+  return (
+    <>
+      {sections.map((section) => (
+        <Section key={section.id} id={section.id} eyebrow={section.label} title={section.title}>
+          <EnglishSectionBody section={section} />
+        </Section>
+      ))}
+    </>
+  );
+}
+
+function EnglishSectionBody({ section }: { section: ArticleSection }) {
+  const content = englishDocsContentBySection[section.id];
+  const paragraphs = content?.paragraphs || [section.description];
+  const rows =
+    content?.rows ||
+    ([
+      ['Purpose', section.description],
+      ['Key terms', section.keywords.slice(0, 8).join(', ')],
+      ['How to read it', 'Use this section as the English orientation for the same project object and workflow covered in the detailed Chinese edition.'],
+    ] as Array<[string, string]>);
+
+  return (
+    <>
+      {paragraphs.map((paragraph) => (
+        <p key={paragraph}>{paragraph}</p>
+      ))}
+      <FieldTable rows={rows} />
+      {content?.code && <CodeBlock>{content.code}</CodeBlock>}
+      {content?.callout && (
+        <div className="rounded-md border border-cyan-200 bg-cyan-50 px-4 py-4 text-sm leading-7 text-cyan-950">
+          {content.callout}
+        </div>
+      )}
+    </>
+  );
+}
+
 function DocsHeader({
   query,
   setQuery,
   searchResults,
+  language,
+  setLanguage,
   activeChapterId,
   sidebarGroups,
   onNavigateSection,
@@ -1457,6 +2458,8 @@ function DocsHeader({
   query: string;
   setQuery: (value: string) => void;
   searchResults: ArticleSection[];
+  language: DocsLanguage;
+  setLanguage: (language: DocsLanguage) => void;
   activeChapterId: string;
   sidebarGroups: NavGroup[];
   onNavigateSection: (sectionId: string) => void;
@@ -1465,6 +2468,8 @@ function DocsHeader({
   const [mobileOpen, setMobileOpen] = useState(false);
   const desktopSearchRef = useRef<HTMLInputElement>(null);
   const mobileSearchRef = useRef<HTMLInputElement>(null);
+  const copy = docsUiCopy[language];
+  const localizedTopNav = topNavForLanguage(language);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -1492,9 +2497,29 @@ function DocsHeader({
           <span className="truncate text-xl font-semibold tracking-tight">AgentCraft Docs</span>
         </Link>
 
-        <span className="hidden items-center rounded-md px-2 py-1 text-sm font-medium text-slate-600 lg:inline-flex">
-          简体中文
-        </span>
+        <div
+          role="tablist"
+          aria-label="Docs language"
+          className="hidden items-center rounded-md border border-slate-200 bg-white p-0.5 shadow-sm lg:inline-flex"
+        >
+          {(['en', 'zh'] as DocsLanguage[]).map((option) => (
+            <button
+              key={option}
+              type="button"
+              role="tab"
+              aria-selected={language === option}
+              onClick={() => setLanguage(option)}
+              className={cn(
+                'h-8 rounded px-3 text-sm font-semibold transition',
+                language === option
+                  ? 'bg-cyan-600 text-white shadow-sm'
+                  : 'text-slate-600 hover:bg-slate-50 hover:text-slate-950',
+              )}
+            >
+              {docsUiCopy[option].languageName}
+            </button>
+          ))}
+        </div>
 
         <div className="relative ml-auto hidden w-full max-w-[420px] md:block">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
@@ -1502,7 +2527,7 @@ function DocsHeader({
             ref={desktopSearchRef}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索 AgentCraft Docs..."
+            placeholder={copy.searchPlaceholder}
             className="h-10 w-full rounded-md border border-slate-200 bg-white pl-9 pr-16 text-sm text-slate-900 shadow-sm outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20"
           />
           <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-xs text-slate-500">
@@ -1533,7 +2558,7 @@ function DocsHeader({
                   </a>
                 ))
               ) : (
-                <div className="px-4 py-4 text-sm text-slate-500">没有找到匹配章节</div>
+                <div className="px-4 py-4 text-sm text-slate-500">{copy.noResults}</div>
               )}
             </div>
           )}
@@ -1541,9 +2566,9 @@ function DocsHeader({
 
         <Link
           to="/projects"
-          className="hidden h-10 items-center gap-2 rounded-md bg-slate-950 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 lg:inline-flex"
+          className="hidden h-10 items-center gap-2 rounded-md bg-cyan-600 px-4 text-sm font-semibold text-white shadow-sm shadow-cyan-900/10 transition hover:bg-cyan-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/30 focus-visible:ring-offset-2 focus-visible:ring-offset-[#f8fafc] lg:inline-flex"
         >
-          打开 Projects
+          {copy.openProjects}
           <ExternalLink className="h-4 w-4" />
         </Link>
 
@@ -1560,13 +2585,37 @@ function DocsHeader({
 
       {mobileOpen && (
         <div className="border-t border-slate-200 bg-white px-4 py-4 md:hidden">
+          <div
+            role="tablist"
+            aria-label="Docs language"
+            className="mb-4 inline-flex items-center rounded-md border border-slate-200 bg-white p-0.5 shadow-sm"
+          >
+            {(['en', 'zh'] as DocsLanguage[]).map((option) => (
+              <button
+                key={option}
+                type="button"
+                role="tab"
+                aria-selected={language === option}
+                onClick={() => setLanguage(option)}
+                className={cn(
+                  'h-8 rounded px-3 text-sm font-semibold transition',
+                  language === option
+                    ? 'bg-cyan-600 text-white shadow-sm'
+                    : 'text-slate-600 hover:bg-slate-50 hover:text-slate-950',
+                )}
+              >
+                {docsUiCopy[option].languageName}
+              </button>
+            ))}
+          </div>
+
           <div className="relative">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
             <input
               ref={mobileSearchRef}
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="搜索 AgentCraft Docs..."
+              placeholder={copy.searchPlaceholder}
               className="h-10 w-full rounded-md border border-slate-200 bg-white pl-9 pr-3 text-sm text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20"
             />
           </div>
@@ -1623,9 +2672,9 @@ function DocsHeader({
           <Link
             to="/projects"
             onClick={() => setMobileOpen(false)}
-            className="mt-4 inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-slate-950 px-4 text-sm font-semibold text-white"
+            className="mt-4 inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-cyan-600 px-4 text-sm font-semibold text-white shadow-sm shadow-cyan-900/10 transition hover:bg-cyan-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/30 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
           >
-            打开 Projects
+            {copy.openProjects}
             <ExternalLink className="h-4 w-4" />
           </Link>
         </div>
@@ -1633,7 +2682,7 @@ function DocsHeader({
 
       <nav className="border-t border-slate-200 bg-[#f8fafc]">
         <div className="mx-auto flex max-w-[1480px] gap-1 overflow-x-auto px-4 sm:px-6 lg:px-8">
-          {topNav.map((item) => {
+          {localizedTopNav.map((item) => {
             const Icon = item.icon || BookOpen;
             return (
               <a
@@ -1654,7 +2703,7 @@ function DocsHeader({
                 <span>{item.label}</span>
                 {item.id === 'ai-coin' && (
                   <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-500">
-                    概念演示
+                    {copy.conceptDemo}
                   </span>
                 )}
               </a>
@@ -1842,39 +2891,54 @@ function EventGraphPreview() {
 
 function RightToc({
   activeId,
-  sections,
+  groups,
+  language,
   onNavigateSection,
 }: {
   activeId: string;
-  sections: ArticleSection[];
+  groups: NavGroup[];
+  language: DocsLanguage;
   onNavigateSection: (sectionId: string) => void;
 }) {
+  const copy = docsUiCopy[language];
+
   return (
     <aside className="hidden 2xl:block">
       <div className="sticky top-[112px]">
         <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-950">
           <Menu className="h-4 w-4" />
-          在此页面
+          {copy.onThisPage}
         </div>
-        <div className="space-y-1 border-l border-slate-200 pl-4">
-          {sections.map((section) => (
-            <a
-              key={section.id}
-              href={`#${section.id}`}
-              onClick={(event) => {
-                event.preventDefault();
-                onNavigateSection(section.id);
-              }}
-              className={cn(
-                'block py-1.5 leading-5 transition',
-                (section.depth || 1) >= 3 ? 'pl-6 text-xs' : (section.depth || 1) === 2 ? 'pl-3 text-sm' : 'text-sm',
-                activeId === section.id
-                  ? 'font-semibold text-cyan-700'
-                  : 'text-slate-500 hover:text-slate-950',
+        <div className="space-y-4 border-l border-slate-200 pl-4">
+          {groups.map((group) => (
+            <div key={group.title}>
+              {groups.length > 1 && (
+                <p className="mb-1.5 text-xs font-semibold text-slate-500">
+                  {group.title}
+                </p>
               )}
-            >
-              {section.title}
-            </a>
+              <div className="space-y-1">
+                {group.items.map((item) => (
+                  <a
+                    key={item.id}
+                    href={item.href}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      onNavigateSection(item.id);
+                    }}
+                    className={cn(
+                      'block py-1.5 leading-5 transition',
+                      (item.depth || 1) >= 3 ? 'pl-6 text-xs' : (item.depth || 1) === 2 ? 'pl-3 text-sm' : 'text-sm',
+                      activeId === item.id
+                        ? 'font-semibold text-cyan-700'
+                        : 'text-slate-500 hover:text-slate-950',
+                    )}
+                  >
+                    {item.label}
+                  </a>
+                ))}
+              </div>
+            </div>
           ))}
         </div>
       </div>
@@ -1949,13 +3013,33 @@ export function Docs() {
     const hashId = window.location.hash.replace('#', '');
     return articleSectionById.has(hashId) ? hashId : articleSections[0].id;
   })();
+  const initialLanguage = (() => {
+    if (typeof window === 'undefined') return 'en' as DocsLanguage;
+    const storedLanguage = window.localStorage.getItem('agentcraft-docs-language');
+    return storedLanguage === 'zh' || storedLanguage === 'en' ? storedLanguage : 'en';
+  })();
   const [activeId, setActiveId] = useState(initialSectionId);
   const [activeChapterId, setActiveChapterId] = useState(articleSectionById.get(initialSectionId)?.chapter || 'quick-start');
+  const [language, setLanguageState] = useState<DocsLanguage>(initialLanguage);
   const [query, setQuery] = useState('');
   const [copied, setCopied] = useState(false);
-  const activeSections = useMemo(() => sectionsForChapter(activeChapterId), [activeChapterId]);
-  const sidebarGroups = useMemo(() => sidebarGroupsForChapter(activeChapterId), [activeChapterId]);
-  const heroCopy = chapterHeroCopy[activeChapterId] || chapterHeroCopy['quick-start'];
+  const activeSections = useMemo(() => sectionsForChapter(activeChapterId, language), [activeChapterId, language]);
+  const sidebarGroups = useMemo(() => sidebarGroupsForChapter(activeChapterId, language), [activeChapterId, language]);
+  const allSearchSections = useMemo(
+    () => articleSections.map((section) => localizeSection(section, language)),
+    [language],
+  );
+  const heroCopy = heroCopyForChapter(activeChapterId, language);
+  const copy = docsUiCopy[language];
+
+  const setLanguage = (nextLanguage: DocsLanguage) => {
+    setLanguageState(nextLanguage);
+    setQuery('');
+  };
+
+  useEffect(() => {
+    window.localStorage.setItem('agentcraft-docs-language', language);
+  }, [language]);
 
   const navigateToSection = (sectionId: string) => {
     const section = articleSectionById.get(sectionId);
@@ -2027,13 +3111,23 @@ export function Docs() {
   const searchResults = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     if (!normalized) return [];
-    return articleSections.filter((section) =>
-      [section.title, section.label, section.description, ...section.keywords]
+    return allSearchSections.filter((section) =>
+      [
+        section.title,
+        section.label,
+        section.description,
+        ...section.keywords,
+        stringifySearchContent(
+          language === 'en'
+            ? [englishDocsContentBySection[section.id]]
+            : docsSearchContentBySection[section.id],
+        ),
+      ]
         .join(' ')
         .toLowerCase()
         .includes(normalized),
     );
-  }, [query]);
+  }, [allSearchSections, language, query]);
 
   const handleCopyPage = async () => {
     try {
@@ -2051,6 +3145,8 @@ export function Docs() {
         query={query}
         setQuery={setQuery}
         searchResults={searchResults}
+        language={language}
+        setLanguage={setLanguage}
         activeChapterId={activeChapterId}
         sidebarGroups={sidebarGroups}
         onNavigateSection={navigateToSection}
@@ -2065,7 +3161,7 @@ export function Docs() {
             <div>
               <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-500">
                 <Home className="h-4 w-4" />
-                文档
+                {copy.docsBreadcrumb}
                 <span>/</span>
                 {heroCopy.eyebrow}
               </div>
@@ -2084,10 +3180,14 @@ export function Docs() {
               className="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
             >
               {copied ? <CheckCircle2 className="h-4 w-4 text-emerald-600" /> : <Copy className="h-4 w-4" />}
-              {copied ? '已复制' : '复制页面'}
+              {copied ? copy.copied : copy.copyPage}
             </button>
           </div>
 
+          {language === 'en' ? (
+            <EnglishDocsChapter sections={activeSections} />
+          ) : (
+            <>
           {activeChapterId === 'quick-start' && (
             <>
 
@@ -2585,6 +3685,9 @@ export function Docs() {
             <p>
               AgentCraft 的角色不是只靠 role name 生效。每个 runtime 进入项目时都会先走 common workspace skill，再叠加 template 或项目配置里的 role skill、capability bundle 和 role prompt。
             </p>
+            <h3 className="pt-2 text-base font-semibold text-slate-950">基础 common workspace skill</h3>
+            <FieldTable rows={agentWorkspaceSkillRows} />
+            <h3 className="pt-2 text-base font-semibold text-slate-950">角色 skill 组合</h3>
             <FieldTable rows={roleSkillRows} />
             <p>
               因此，同样是 <InlineCode>WORKER_AGENT</InlineCode>，在 HackerOne 模版里可以是机会发现或安全验证 skill；在文档模版里可以是写作、审校或发布 skill。角色给出协作位置，skill 给出具体做法，scope 给出真正能触碰的资源边界。
@@ -2739,6 +3842,12 @@ Mounted runtime context:
             <h3 className="pt-2 text-base font-semibold text-slate-950">共享文件：怎么实现</h3>
             <FieldTable rows={sharedFileImplementationRows} />
 
+            <h3 className="pt-2 text-base font-semibold text-slate-950">共享文件：API 速查</h3>
+            <FieldTable rows={projectFileApiRows} />
+
+            <h3 className="pt-2 text-base font-semibold text-slate-950">共享文件：project-files.sh</h3>
+            <FieldTable rows={projectFileHelperRows} />
+
             <h3 className="pt-2 text-base font-semibold text-slate-950">共享文件：什么时候读写</h3>
             <FieldTable rows={sharedFileReadWriteRows} />
 
@@ -2749,7 +3858,15 @@ project-file-list
 project-file-read docs/brief.md
 project-file-write --work-item "$WORK_ITEM_ID" reports/status.md ./status.md
 project-file-upload --work-item "$WORK_ITEM_ID" ./evidence.png reports/evidence.png
-project-file-read reports/status.md   # 完成前反读验证 exact path`}
+project-file-read reports/status.md   # 完成前反读验证 exact path
+
+# 也可以直接执行同一个脚本，适合一次性 shell 命令
+bash /opt/data/skills/agent-workspace/scripts/project-files.sh list
+bash /opt/data/skills/agent-workspace/scripts/project-files.sh search reports status
+bash /opt/data/skills/agent-workspace/scripts/project-files.sh read docs/brief.md
+bash /opt/data/skills/agent-workspace/scripts/project-files.sh write --work-item "$WORK_ITEM_ID" reports/status.md ./status.md
+bash /opt/data/skills/agent-workspace/scripts/project-files.sh upload --work-item "$WORK_ITEM_ID" ./evidence.png reports/evidence.png
+bash /opt/data/skills/agent-workspace/scripts/project-files.sh download-url reports/status.md`}
             </CodeBlock>
 
             <h3 className="pt-2 text-base font-semibold text-slate-950">Project memory：形态</h3>
@@ -3002,18 +4119,20 @@ TOS_PUBLIC_URL`}
           </Section>
             </>
           )}
+            </>
+          )}
         </article>
 
-        <RightToc activeId={activeId} sections={activeSections} onNavigateSection={navigateToSection} />
+        <RightToc activeId={activeId} groups={sidebarGroups} language={language} onNavigateSection={navigateToSection} />
       </main>
 
       <footer className="border-t border-slate-200 bg-white">
         <div className="mx-auto flex max-w-[1480px] flex-col gap-3 px-4 py-6 text-sm text-slate-500 sm:px-6 md:flex-row md:items-center md:justify-between lg:px-8">
           <span>AgentCraft Docs</span>
           <div className="flex flex-wrap gap-4">
-            <Link to="/" className="hover:text-slate-950">AgentCraft</Link>
-            <Link to="/projects" className="hover:text-slate-950">Projects</Link>
-            <a href="#overview" className="hover:text-slate-950">Back to top</a>
+            <Link to="/" className="hover:text-slate-950">{copy.footerHome}</Link>
+            <Link to="/projects" className="hover:text-slate-950">{copy.footerProjects}</Link>
+            <a href="#overview" className="hover:text-slate-950">{copy.footerBackToTop}</a>
           </div>
         </div>
       </footer>

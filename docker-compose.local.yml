@@ -43,7 +43,7 @@ services:
       DATABASE_URL: mysql://aifactory:aifactory_dev@mysql:3306/${AGENTCRAFT_DB_NAME:-agentcraft_public}
       REDIS_URL: redis://redis:6379
       CORS_ORIGIN: http://localhost:${AGENTCRAFT_FRONTEND_PORT:-8088},http://localhost:${AGENTCRAFT_API_PORT:-3100},http://localhost
-      JWT_SECRET: dev-jwt-secret-change-in-production
+      JWT_SECRET: local-public-docker-jwt-secret-please-replace-2026
       EMAIL_VERIFICATION_DISABLED: "true"
       RUN_DB_MIGRATIONS_ON_START: "true"
       # Local restart scripts run seed-local-db.* explicitly after migrations.

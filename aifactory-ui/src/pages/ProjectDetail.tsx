@@ -148,7 +148,7 @@ const PROJECT_DETAIL_TOUR_BASE_STEPS: GuidedTourStep[] = [
   {
     selector: '[data-tour="project-local-agent"]',
     title: 'Launch Local Agent',
-    body: 'After a lead agent member exists, select it and click Local Agent. This queues a local Codex runtime that your device runner can claim.',
+    body: 'After a lead agent member exists, select it and click Local Agent. This queues a local CLI runtime that your device runner can claim.',
     actionLabel: 'Choose Local Agent for the lead agent.',
   },
   {
@@ -1315,7 +1315,7 @@ const DEFAULT_PROJECT_COORDINATOR_CONFIG: ProjectCoordinatorConfig = {
   maxDispatchesPerTick: 3,
   launchMode: 'local-docker',
   agentType: 'pi',
-  messageTemplate: '当前有未被分配的 item {{title}}，通过 {{launchMode}}/{{agentType}} 拉起角色 {{role}}。',
+  messageTemplate: '当前有未被分配的 item {{title}}，通过 {{launchTarget}} 拉起角色 {{role}}。',
   lastTickAt: null,
   dispatchRules: [],
 };
@@ -1333,8 +1333,16 @@ function isCloudAgentLaunchMode(mode?: AgentLaunchMode | null) {
   return mode === 'aws-ecs' || mode === 'aws-agentcore';
 }
 
+function supportsLocalCliLaunch(agentType: string) {
+  return ['codex', 'pi'].includes((agentType || '').trim().toLowerCase());
+}
+
 function usesLocalCliAuth(mode: AgentLaunchMode, agentType: string) {
-  return mode === 'local-codex' || (['local-docker', 'local-runner'].includes(mode) && ['codex', 'claude-code'].includes(agentType));
+  const normalizedAgentType = (agentType || '').trim().toLowerCase();
+  return (
+    ['codex', 'claude-code'].includes(normalizedAgentType) &&
+    (mode === 'local-codex' || ['local-docker', 'local-runner'].includes(mode))
+  );
 }
 
 function normalizeAvailableLaunchMode(mode: AgentLaunchMode) {
@@ -1438,14 +1446,14 @@ function localRunnerScriptUrl() {
   return '/agentcraft-local-runner.mjs';
 }
 
-function localCodexScriptUrl() {
+function localAgentScriptUrl() {
   if (IS_PRODUCTION_AGENTCRAFT_HOST) {
-    return 'https://www.agentcraft.work/agentcraft-local-codex-runner.mjs';
+    return 'https://www.agentcraft.work/agentcraft-local-agent-runner.mjs';
   }
   if (typeof window !== 'undefined') {
-    return new URL('/agentcraft-local-codex-runner.mjs', window.location.origin).toString();
+    return new URL('/agentcraft-local-agent-runner.mjs', window.location.origin).toString();
   }
-  return '/agentcraft-local-codex-runner.mjs';
+  return '/agentcraft-local-agent-runner.mjs';
 }
 
 function localRuntimeArgs(projectId: string | undefined, token: string, memberId?: string) {
@@ -1471,27 +1479,19 @@ function detectLocalRunnerCommandMode(): LocalRunnerCommandMode {
 
 function localRuntimeCommands(projectId: string | undefined, token: string, memberId: string | undefined, mode: 'local-runner' | 'local-codex' = 'local-runner') {
   const args = localRuntimeArgs(projectId, token, memberId);
-  const scriptName = mode === 'local-codex' ? 'agentcraft-local-codex-runner.mjs' : 'agentcraft-local-runner.mjs';
-  const scriptUrl = mode === 'local-codex' ? localCodexScriptUrl() : localRunnerScriptUrl();
+  const scriptName = mode === 'local-codex' ? 'agentcraft-local-agent-runner.mjs' : 'agentcraft-local-runner.mjs';
+  const scriptUrl = mode === 'local-codex' ? localAgentScriptUrl() : localRunnerScriptUrl();
   const domainKey = localRuntimeDomainKey();
-  const dataRootName = mode === 'local-codex' ? 'local-codex' : 'runtimes';
+  const dataRootName = mode === 'local-codex' ? 'local-agent' : 'runtimes';
   const powershellDataRootName = `AgentCraft\\${domainKey}\\${dataRootName}`;
   const shellDataRootName = `${domainKey}/${dataRootName}`;
-  const powershellCodexPrefix = mode === 'local-codex'
-    ? `$codex = (Get-Command codex -ErrorAction SilentlyContinue).Source; if (-not $codex) { Write-Error 'Codex CLI was not found on PATH. Install and sign in to Codex CLI, or edit this command to pass --codex-bin <path>.'; exit 1 }; `
-    : '';
-  const powershellCodexArg = mode === 'local-codex' ? ' --codex-bin $codex' : '';
-  const powershellCommand = `${powershellCodexPrefix}$runnerDir = [System.IO.Path]::GetTempPath(); $runner = Join-Path $runnerDir '${scriptName}'; $dataRootBase = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $HOME 'AppData\\Local' }; $dataRoot = Join-Path $dataRootBase '${powershellDataRootName}'; Invoke-WebRequest -UseBasicParsing '${scriptUrl}' -OutFile $runner; node $runner ${args}${powershellCodexArg} --data-root $dataRoot`;
-  const shellCodexPrefix = mode === 'local-codex'
-    ? `codex_bin="$(command -v codex || true)" && if [ -z "$codex_bin" ]; then echo 'Codex CLI was not found on PATH. Install and sign in to Codex CLI, or edit this command to pass --codex-bin <path>.' >&2; exit 1; fi && `
-    : '';
-  const shellCodexArg = mode === 'local-codex' ? ' --codex-bin "$codex_bin"' : '';
+  const powershellCommand = `$runnerDir = [System.IO.Path]::GetTempPath(); $runner = Join-Path $runnerDir '${scriptName}'; $dataRootBase = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $HOME 'AppData\\Local' }; $dataRoot = Join-Path $dataRootBase '${powershellDataRootName}'; Invoke-WebRequest -UseBasicParsing '${scriptUrl}' -OutFile $runner; node $runner ${args} --data-root $dataRoot`;
   const shellRunnerPrefix = `runner_dir="\${TMPDIR:-/tmp}" && mkdir -p "$runner_dir" && runner="$runner_dir/${scriptName}"`;
   return {
     powershell: powershellCommand,
     cmd: `powershell -NoProfile -ExecutionPolicy Bypass -Command "${powershellCommand}"`,
-    wsl: `${shellCodexPrefix}${shellRunnerPrefix} && data_root="$HOME/.agentcraft/${shellDataRootName}" && curl -fsSL '${scriptUrl}' -o "$runner" && node "$runner" ${args}${shellCodexArg} --data-root "$data_root"`,
-    mac: `${shellCodexPrefix}${shellRunnerPrefix} && data_root="$HOME/Library/Application Support/AgentCraft/${shellDataRootName}" && curl -fsSL '${scriptUrl}' -o "$runner" && node "$runner" ${args}${shellCodexArg} --data-root "$data_root"`,
+    wsl: `${shellRunnerPrefix} && data_root="$HOME/.agentcraft/${shellDataRootName}" && curl -fsSL '${scriptUrl}' -o "$runner" && node "$runner" ${args} --data-root "$data_root"`,
+    mac: `${shellRunnerPrefix} && data_root="$HOME/Library/Application Support/AgentCraft/${shellDataRootName}" && curl -fsSL '${scriptUrl}' -o "$runner" && node "$runner" ${args} --data-root "$data_root"`,
   };
 }
 
@@ -1550,8 +1550,8 @@ const LAUNCH_AGENT_TYPES = [
 function launchAgentTypeOption(agentType: typeof LAUNCH_AGENT_TYPES[number], launchMode: AgentLaunchMode) {
   if (launchMode === 'local-codex') {
     return {
-      available: agentType.id === 'codex',
-      caption: agentType.id === 'codex' ? 'Available now' : 'Coming soon',
+      available: supportsLocalCliLaunch(agentType.id),
+      caption: supportsLocalCliLaunch(agentType.id) ? 'Available now' : 'Coming soon',
     };
   }
   return {
@@ -1569,6 +1569,15 @@ function formatAgentTypeLabel(agentType?: string | null) {
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(' ') || 'Pi';
+}
+
+function displayLaunchMode(launchMode?: AgentLaunchMode | string | null) {
+  return launchMode === 'local-codex' ? 'local-agent' : (launchMode || 'local-docker');
+}
+
+function displayLaunchTarget(launchMode?: AgentLaunchMode | string | null, agentType?: string | null) {
+  const normalizedAgentType = (agentType || 'pi').trim().toLowerCase().replace(/_/g, '-') || 'pi';
+  return `${displayLaunchMode(launchMode)}/${normalizedAgentType}`;
 }
 
 type ProjectSectionKey = 'home' | 'events' | 'members' | 'planning' | 'work' | 'knowledge' | 'documents' | 'delivery' | 'settings';
@@ -2348,7 +2357,7 @@ export function ProjectDetail() {
   const [launchConfigForm, setLaunchConfigForm] = useState(DEFAULT_LAUNCH_CONFIG_FORM);
 
   useEffect(() => {
-    if (launchMode !== 'local-codex' || launchAgentType === 'codex') return;
+    if (launchMode !== 'local-codex' || supportsLocalCliLaunch(launchAgentType)) return;
     const preferred =
       agentRuntimeImages.find((image) => image.provider === 'local-codex' && (image.agentType || DEFAULT_LAUNCH_AGENT_TYPE) === 'codex') ||
       agentRuntimeImages.find((image) => (image.agentType || DEFAULT_LAUNCH_AGENT_TYPE) === 'codex');
@@ -3653,6 +3662,45 @@ export function ProjectDetail() {
   const selectedWorkItemFeatureTitle = selectedWorkItemForDetail?.featureId
     ? featureById.get(selectedWorkItemForDetail.featureId)?.title || 'Linked feature'
     : 'No feature';
+
+  const selectedRelatedWorkItems = useMemo(() => {
+    const item = selectedWorkItemForDetail as any;
+    if (!item) return [];
+    const dependsOn = Array.isArray(item.dependsOn) ? item.dependsOn.filter(Boolean) : [];
+    const explicitRelated = [
+      ...(Array.isArray(item.relatedItems) ? item.relatedItems : []),
+      ...(Array.isArray(item.dependencyItems) ? item.dependencyItems : []),
+    ];
+    const byId = new Map<string, any>();
+    for (const related of explicitRelated) {
+      const relatedId = typeof related?.id === 'string' ? related.id : typeof related?.workItemId === 'string' ? related.workItemId : '';
+      if (relatedId && !byId.has(relatedId)) byId.set(relatedId, related);
+    }
+    for (const summary of workItems) {
+      if (dependsOn.includes(summary.id) && !byId.has(summary.id)) byId.set(summary.id, summary);
+    }
+    const ordered = dependsOn.map((relatedId: string) => byId.get(relatedId) || {
+      id: relatedId,
+      title: `Work item ${relatedId.slice(0, 8)}`,
+      status: 'UNKNOWN',
+      workType: 'DEPENDENCY',
+    });
+    for (const related of explicitRelated) {
+      const relatedId = typeof related?.id === 'string' ? related.id : typeof related?.workItemId === 'string' ? related.workItemId : '';
+      if (relatedId && !ordered.some((entry: any) => entry.id === relatedId)) ordered.push(related);
+    }
+    return ordered;
+  }, [selectedWorkItemForDetail, workItems]);
+
+  const selectedAcceptedUpstreamByItemId = useMemo(() => {
+    const item = selectedWorkItemForDetail as any;
+    const entries = Array.isArray(item?.acceptedUpstreamItems) ? item.acceptedUpstreamItems : [];
+    return new Map(
+      entries
+        .map((entry: any) => [entry.workItemId || entry.id, entry])
+        .filter(([entryId]: any[]) => typeof entryId === 'string' && entryId.length > 0),
+    );
+  }, [selectedWorkItemForDetail]);
 
   const selectedWorkItemAssignments = useMemo(
     () =>
@@ -5849,8 +5897,8 @@ export function ProjectDetail() {
       const useProjectScope = Boolean(memberId);
       const result = mode === 'local-codex'
         ? useProjectScope
-          ? await api.projects.agentRuntimes.createCodexToken(id, { name: 'Local Codex' })
-          : await api.projects.agentRuntimes.createAccountCodexToken({ name: 'Local Codex runner device' })
+          ? await api.projects.agentRuntimes.createCodexToken(id, { name: 'Local Agent' })
+          : await api.projects.agentRuntimes.createAccountCodexToken({ name: 'Local Agent runner device' })
         : useProjectScope
           ? await api.projects.agentRuntimes.createRunnerToken(id, { name: 'Local runner' })
           : await api.projects.agentRuntimes.createAccountRunnerToken({ name: 'Local Docker runner device' });
@@ -5866,7 +5914,7 @@ export function ProjectDetail() {
         setLocalRunnerTokenCopied(false);
       }
     } catch (err: any) {
-      setError(err.message || `Failed to create ${mode === 'local-codex' ? 'local Codex' : 'local runner'} token`);
+      setError(err.message || `Failed to create ${mode === 'local-codex' ? 'local agent' : 'local runner'} token`);
     } finally {
       setCreatingLocalRunnerToken(false);
     }
@@ -6594,7 +6642,10 @@ export function ProjectDetail() {
     const defaults = projectRoleAgentDefaultsFromSettings(project?.settings || null)[role] || {};
     const defaultMode = defaults.launchMode || mode;
     const requestedMode = normalizeAvailableLaunchMode(defaultMode);
-    const requestedAgentType = requestedMode === 'local-codex' ? 'codex' : defaults.agentType || DEFAULT_LAUNCH_AGENT_TYPE;
+    const defaultAgentType = defaults.agentType || DEFAULT_LAUNCH_AGENT_TYPE;
+    const requestedAgentType = requestedMode === 'local-codex'
+      ? supportsLocalCliLaunch(defaultAgentType) ? defaultAgentType : 'codex'
+      : defaultAgentType;
     const activeConfig = apiConfigs.find((config) => config.isActive) || apiConfigs[0];
     setPendingAgentLaunch({ role, memberId });
     const preferredImage =
@@ -6602,7 +6653,7 @@ export function ProjectDetail() {
       agentRuntimeImages.find((image) => image.provider === requestedMode) ||
       agentRuntimeImages[0];
     setLaunchImage(defaults.image || preferredImage?.id || '');
-    setLaunchLlmConfigId(requestedMode === 'local-codex' ? '' : activeConfig?.id || '');
+    setLaunchLlmConfigId(usesLocalCliAuth(requestedMode, requestedAgentType) ? '' : activeConfig?.id || '');
     setLaunchAgentType(requestedAgentType);
     setLaunchMode(requestedMode);
     setLaunchDeploymentDays(defaults.deploymentDays || 1);
@@ -6729,7 +6780,10 @@ export function ProjectDetail() {
     setSelectedAgentProfileId(profileId);
     if (!profile) return;
     const nextMode = normalizeAvailableLaunchMode(profile.launchMode);
-    const nextAgentType = nextMode === 'local-codex' ? 'codex' : profile.agentType || DEFAULT_LAUNCH_AGENT_TYPE;
+    const profileAgentType = profile.agentType || DEFAULT_LAUNCH_AGENT_TYPE;
+    const nextAgentType = nextMode === 'local-codex'
+      ? supportsLocalCliLaunch(profileAgentType) ? profileAgentType : 'codex'
+      : profileAgentType;
     setPendingAgentLaunch((current) =>
       current
         ? {
@@ -6741,7 +6795,7 @@ export function ProjectDetail() {
     setLaunchMode(nextMode);
     setLaunchAgentType(nextAgentType);
     setLaunchImage(profile.image || '');
-    setLaunchLlmConfigId(nextMode === 'local-codex' ? '' : profile.llmConfigId || launchLlmConfigId);
+    setLaunchLlmConfigId(usesLocalCliAuth(nextMode, nextAgentType) ? '' : profile.llmConfigId || launchLlmConfigId);
     setLaunchDeploymentDays(Math.max(1, profile.deploymentDays || 1));
     setLaunchEnableSudo(agentProfileSudoEnabled(profile));
     setSaveAgentProfileName('');
@@ -6844,7 +6898,7 @@ export function ProjectDetail() {
         isCloudAgentLaunchMode(launchMode)
           ? CLOUD_AGENT_UNAVAILABLE_NOTICE
           : launchMode === 'local-codex'
-            ? 'Deployment cost: 0 AIC. Local Agent uses your own Codex CLI session.'
+            ? 'Deployment cost: 0 AIC. Local Agent uses your own local CLI runner.'
             : 'Deployment cost: 0 AIC. Local modes use your own Docker capacity.',
       );
       appendLaunchLog('info', 'Requesting runtime from API server.');
@@ -6869,7 +6923,7 @@ export function ProjectDetail() {
           : launchMode === 'local-codex'
             ? projectRunnerOnline
               ? `Local Agent job queued for member ${launched.memberId}. The online local runner will claim it automatically.`
-              : `Local Agent job queued for member ${launched.memberId}. Start the local runner to claim pending local Codex agents.`
+              : `Local Agent job queued for member ${launched.memberId}. Start the local runner to claim pending local agents.`
           : `Runtime created for member ${launched.memberId}.`,
       );
       setSelectedAgentMemberId(launched.memberId);
@@ -8776,7 +8830,7 @@ export function ProjectDetail() {
 		                        <p className="font-medium">Local Runner Device</p>
                         </div>
                         <p className="text-sm text-muted-foreground">
-		                          Create an account-scoped command for agentcraft-local-runner or agentcraft-local-codex-runner.
+		                          Create an account-scoped command for the Docker runner or local agent runner.
 		                          One runner process on this computer can claim queued local jobs across your manageable projects.
                         </p>
                       </div>
@@ -8827,13 +8881,13 @@ export function ProjectDetail() {
                         <div className="rounded-md border bg-muted/10 px-3 py-3 text-xs leading-5 text-muted-foreground">
                           <p className="font-medium text-foreground">Before running</p>
                           {localRunnerTokenResult.mode === 'local-codex' ? (
-                            <p>Install Node.js 18+ and make sure Codex CLI is on PATH and signed in on this machine.</p>
+                            <p>Install Node.js 22.19+. Codex jobs use Codex CLI from PATH; Pi jobs auto-install the Pi npm package if `pi` is not already available.</p>
                           ) : (
                             <p>Install Node.js 18+ and start Docker Desktop.</p>
                           )}
                           <p>No repo checkout is required. The command downloads the runner script from AgentCraft.</p>
                           {localRunnerTokenResult.mode === 'local-codex' ? (
-                            <p>No local agent directory is required. The command auto-detects `codex`; edit `--codex-bin` only if Codex CLI lives outside PATH.</p>
+                            <p>No local agent directory is required. Edit `--codex-bin` or `--pi-bin` only when the CLI lives outside PATH.</p>
                           ) : (
                             <p>The Hermes Docker image for this runtime must be available locally or pullable by Docker.</p>
                           )}
@@ -9556,7 +9610,10 @@ export function ProjectDetail() {
                                             <span className="font-medium text-foreground">{rule.role}</span>
                                           </div>
                                           <p className="mt-1 text-xs text-muted-foreground">
-                                            {(rule.launchMode || projectCoordinatorConfig.launchMode || 'local-docker')} / {(rule.agentType || projectCoordinatorConfig.agentType || 'pi')}
+                                            {displayLaunchTarget(
+                                              rule.launchMode || projectCoordinatorConfig.launchMode || 'local-docker',
+                                              rule.agentType || projectCoordinatorConfig.agentType || 'pi',
+                                            )}
                                             {rule.minAgents ? ` · min ${rule.minAgents}` : ''}
                                             {rule.maxAgents ? ` · max ${rule.maxAgents}` : ''}
                                             {rule.forceLaunchNew === false ? ' · reusable runtime' : ' · new runtime'}
@@ -9660,7 +9717,7 @@ export function ProjectDetail() {
                                   />
                                 </label>
                                 <div className="rounded-md bg-muted/10 px-3 py-2 text-[11px] leading-5 text-muted-foreground">
-                                  Variables: {'{{title}}'}, {'{{workType}}'}, {'{{status}}'}, {'{{role}}'}, {'{{launchMode}}'}, {'{{agentType}}'}, {'{{goalTitle}}'}.
+                                  Variables: {'{{title}}'}, {'{{workType}}'}, {'{{status}}'}, {'{{role}}'}, {'{{launchMode}}'}, {'{{launchModeRaw}}'}, {'{{agentType}}'}, {'{{launchTarget}}'}, {'{{goalTitle}}'}.
                                 </div>
                                 <label className="space-y-1.5">
                                   <span className="font-medium text-foreground">Trigger rules JSON</span>
@@ -10546,14 +10603,14 @@ export function ProjectDetail() {
 	                                      <p className="font-medium text-foreground">Before running</p>
                                       <p>
                                         {selectedAgentRuntime.session.provider === 'local-codex'
-                                          ? 'Install Node.js 18+ and make sure Codex CLI is on PATH and signed in on this machine.'
+                                          ? 'Install Node.js 22.19+. Codex jobs use Codex CLI from PATH; Pi jobs auto-install the Pi npm package if `pi` is not already available.'
                                           : 'Install Node.js 18+ and start Docker Desktop.'}
                                       </p>
 	                                      <p>No repo checkout is required. The command downloads the runner script from AgentCraft.</p>
 	                                      <p>A single account runner claims and supervises pending local agents of the same runner type across your manageable projects.</p>
                                       <p>
                                         {selectedAgentRuntime.session.provider === 'local-codex'
-                                          ? 'No local agent directory is required. The command auto-detects `codex`; edit `--codex-bin` only if Codex CLI lives outside PATH.'
+                                          ? 'No local agent directory is required. Edit `--codex-bin` or `--pi-bin` only when the CLI lives outside PATH.'
                                           : 'For local Docker agents, the selected image must be available locally or pullable by Docker.'}
                                       </p>
                                     </div>
@@ -11084,7 +11141,7 @@ export function ProjectDetail() {
                               <div className="min-w-0">
                                 <p className="truncate text-sm font-medium">{profile.name}</p>
                                 <p className="truncate text-xs text-muted-foreground">
-                                  {profile.role} · {cloudProfileUnavailable ? 'cloud unavailable' : profile.launchMode}
+                                  {profile.role} · {cloudProfileUnavailable ? 'cloud unavailable' : displayLaunchMode(profile.launchMode)}
                                 </p>
                               </div>
                               <Button
@@ -11259,7 +11316,7 @@ export function ProjectDetail() {
                             <option value="">Current launch settings</option>
                             {launchProfilesForRole.map((profile) => (
                               <option key={profile.id} value={profile.id}>
-                                {profile.name} · {isCloudAgentLaunchMode(profile.launchMode) ? 'cloud unavailable' : profile.launchMode} · {profile.role}
+                                  {profile.name} · {isCloudAgentLaunchMode(profile.launchMode) ? 'cloud unavailable' : displayLaunchMode(profile.launchMode)} · {profile.role}
                               </option>
                             ))}
                           </select>
@@ -11301,7 +11358,7 @@ export function ProjectDetail() {
                             }}
                           >
                             {launchModelApiOptional && (
-                              <option value="">Use local Codex auth</option>
+                              <option value="">Use local CLI auth</option>
                             )}
                             {apiConfigs.length === 0 ? (
                               <option value="">Create a working configuration first</option>
@@ -11490,7 +11547,7 @@ export function ProjectDetail() {
                             {
                               id: 'local-codex' as AgentLaunchMode,
                               label: 'Local Agent',
-                              caption: 'Connects through your local Codex CLI with a project token.',
+                              caption: 'Connects through your local CLI runner with a project token.',
                               icon: Brain,
                               unavailable: false,
                             },
@@ -11512,7 +11569,9 @@ export function ProjectDetail() {
                                   disabled={disabled}
                                   onClick={() => {
                                     if (disabled) return;
-                                    const nextAgentType = mode.id === 'local-codex' ? 'codex' : launchAgentType;
+                                    const nextAgentType = mode.id === 'local-codex'
+                                      ? supportsLocalCliLaunch(launchAgentType) ? launchAgentType : 'codex'
+                                      : launchAgentType;
                                     setLaunchMode(mode.id);
                                     setLaunchAgentType(nextAgentType);
                                     if (isCloudAgentLaunchMode(mode.id)) setLaunchEnableSudo(false);
@@ -11646,7 +11705,7 @@ export function ProjectDetail() {
                                 : launchMode === 'aws-agentcore'
                                   ? 'Cloud Agent is temporarily unavailable.'
                                 : launchMode === 'local-codex'
-                                  ? 'Local Agent runs through your account runner and local Codex CLI session without consuming project AICoin.'
+                                  ? 'Local Agent runs through your account runner and local CLI without consuming project AICoin.'
                                 : launchMode === 'local-runner'
                                   ? 'Local runner mode starts Docker on your registered runner machine and does not consume project AICoin.'
                                   : 'Local Docker mode starts a runtime from the API host and does not consume project AICoin.'}
@@ -12860,6 +12919,67 @@ export function ProjectDetail() {
                           </p>
                         </div>
                       )}
+                      {selectedRelatedWorkItems.length ? (
+                        <div className="rounded-md border bg-background px-3 py-3">
+                          <div className="mb-3 flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <GitPullRequest className="h-4 w-4 text-muted-foreground" />
+                              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Related Items</p>
+                            </div>
+                            <Badge variant="outline">{selectedRelatedWorkItems.length}</Badge>
+                          </div>
+                          <div className="space-y-2">
+                            {selectedRelatedWorkItems.map((related: any) => {
+                              const relatedId = related.id || related.workItemId;
+                              const upstream = selectedAcceptedUpstreamByItemId.get(relatedId) as any;
+                              const outputPaths =
+                                Array.isArray(upstream?.outputPaths) && upstream.outputPaths.length
+                                  ? upstream.outputPaths
+                                  : Array.isArray(upstream?.outputProjectFiles) && upstream.outputProjectFiles.length
+                                    ? upstream.outputProjectFiles
+                                    : Array.isArray(related.outputProjectFiles)
+                                      ? related.outputProjectFiles
+                                      : [];
+                              return (
+                                <button
+                                  key={relatedId}
+                                  type="button"
+                                  className="w-full rounded-md border bg-muted/10 px-3 py-3 text-left transition-colors hover:border-primary/50 hover:bg-muted/20"
+                                  onClick={() => relatedId && openWorkItemDetail(relatedId)}
+                                >
+                                  <div className="flex flex-wrap items-start justify-between gap-2">
+                                    <div className="min-w-0">
+                                      <p className="line-clamp-2 text-sm font-medium">{related.title || `Work item ${String(relatedId || '').slice(0, 8)}`}</p>
+                                      <p className="mt-1 text-xs text-muted-foreground">id {String(relatedId || '').slice(0, 8)}</p>
+                                    </div>
+                                    <div className="flex flex-wrap justify-end gap-2">
+                                      {related.workType ? <Badge variant="outline">{related.workType}</Badge> : null}
+                                      {related.status ? (
+                                        <Badge variant={WORK_ITEM_STATUS_VARIANT[related.status] || 'secondary'}>{related.status}</Badge>
+                                      ) : null}
+                                    </div>
+                                  </div>
+                                  {related.description || related.scopeBrief ? (
+                                    <p className="mt-2 line-clamp-3 text-sm leading-6 text-muted-foreground">
+                                      {related.description || related.scopeBrief}
+                                    </p>
+                                  ) : null}
+                                  {outputPaths.length ? (
+                                    <div className="mt-2 flex flex-wrap gap-2">
+                                      {outputPaths.slice(0, 4).map((path: string) => (
+                                        <Badge key={path} variant="secondary" className="max-w-full truncate">
+                                          {path}
+                                        </Badge>
+                                      ))}
+                                      {outputPaths.length > 4 ? <Badge variant="outline">+{outputPaths.length - 4}</Badge> : null}
+                                    </div>
+                                  ) : null}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ) : null}
                       {selectedResourceRequest && (
                         <form onSubmit={handleCompleteResourceWorkItem} className="rounded-md border border-primary/30 bg-primary/5 px-3 py-3">
                           <div className="mb-3 flex flex-wrap items-start justify-between gap-3">

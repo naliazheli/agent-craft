@@ -8,20 +8,28 @@ const args = parseArgs(process.argv.slice(2));
 if (Object.prototype.hasOwnProperty.call(args, 'help')) {
   console.log([
     'Usage:',
-    '  node scripts/agentcraft-local-codex-runner.mjs --api http://localhost:3100/api --token <account-runner-token>',
-    '  node scripts/agentcraft-local-codex-runner.mjs --api http://localhost:3100/api --project <project-id> --token <runner-token>',
-    '  node scripts/agentcraft-local-codex-runner.mjs --api http://localhost:3100/api --project <project-id> --token <runner-token> --member <member-id>',
-    '  node scripts/agentcraft-local-codex-runner.mjs --api http://localhost:3100/api --project <project-id> --email <email> --password <password>',
+    '  node scripts/agentcraft-local-agent-runner.mjs --api http://localhost:3100/api --token <account-runner-token>',
+    '  node scripts/agentcraft-local-agent-runner.mjs --api http://localhost:3100/api --project <project-id> --token <runner-token>',
+    '  node scripts/agentcraft-local-agent-runner.mjs --api http://localhost:3100/api --project <project-id> --token <runner-token> --member <member-id>',
+    '  node scripts/agentcraft-local-agent-runner.mjs --api http://localhost:3100/api --project <project-id> --email <email> --password <password>',
     '',
     'Options:',
     '  --token <jwt-or-runner-token>          Use an AgentCraft JWT, acu_ account runner token, or acr_ project runner token.',
     '  --project <project-id>                 Optional project scope. Omit it to supervise all manageable projects for the account.',
     '  --member <member-id>                  Claim and poll only one member. Requires --project.',
-    '  --data-root <path>                    Runtime bundle directory. Default: .agent-runtimes/local-codex',
+    '  --data-root <path>                    Runtime bundle directory. Default: .agentcraft/local-agent',
     '  --codex-bin <path>                    Codex executable. Default: codex.',
     '  --model <model>                       Optional model passed to codex exec.',
     '  --codex-arg=<arg>                     Extra argument passed to codex exec. Repeatable; use = for values that start with --.',
+    '  --pi-bin <path>                       Pi executable. Default: pi, with local npm package install fallback.',
+    '  --pi-package <pkg>                    Pi npm package installed when pi is missing. Default: @earendil-works/pi-coding-agent.',
+    '  --pi-install-dir <path>               Local Pi package install directory. Default: <data-root>/.pi-package.',
+    '  --pi-model <model>                    Optional model passed to pi. Default: queued runtime model.',
+    '  --pi-arg=<arg>                        Extra argument passed to pi. Repeatable; use = for values that start with --.',
+    '  --no-pi-auto-install                  Do not install the Pi npm package when pi is missing.',
     '  --codex-timeout-ms <ms>               Kill a stuck codex exec after this many ms. Default: 1200000.',
+    '  --pi-timeout-ms <ms>                  Kill a stuck pi run after this many ms. Default: same as --codex-timeout-ms.',
+    '  --pi-install-timeout-ms <ms>          Kill a stuck npm install after this many ms. Default: 300000.',
     '  --codex-reconnect-fail-fast-ms <ms>   Kill delay after exhausted reconnects. Default: 15000; set -1 to disable.',
     '  --max-concurrent-codex-execs <n>      Optional maximum simultaneous codex exec processes. Default: unlimited.',
     '  --debug                               Print accepted request and final response for local debugging.',
@@ -34,7 +42,7 @@ if (Object.prototype.hasOwnProperty.call(args, 'help')) {
     '  --once                                Claim once and exit without polling messages.',
     '',
     'The runner uses outbound polling only: AgentCraft queues work, this process claims it,',
-    'runs `codex exec` locally, and posts progress/completion back to AgentCraft.',
+    'runs the selected local CLI agent, and posts progress/completion back to AgentCraft.',
   ].join('\n'));
   process.exit(0);
 }
@@ -42,11 +50,20 @@ if (Object.prototype.hasOwnProperty.call(args, 'help')) {
 const apiBaseUrl = trimSlash(optionValue(args.api, '--api') || process.env.AGENTCRAFT_API_BASE_URL || 'http://localhost:3100/api');
 const projectId = optionValue(args.project, '--project') || process.env.AGENTCRAFT_PROJECT_ID || '';
 const memberId = optionValue(args.member, '--member') || process.env.AGENTCRAFT_MEMBER_ID || '';
-const dataRoot = resolve(optionValue(args.dataRoot, '--data-root') || process.env.AGENTCRAFT_CODEX_RUNNER_DATA_ROOT || defaultDataRoot());
+const dataRoot = resolve(optionValue(args.dataRoot, '--data-root') || process.env.AGENTCRAFT_LOCAL_AGENT_DATA_ROOT || process.env.AGENTCRAFT_CODEX_RUNNER_DATA_ROOT || defaultDataRoot());
 const codexBin = optionValue(args.codexBin, '--codex-bin') || process.env.AGENTCRAFT_CODEX_BIN || defaultCodexBin();
+const configuredPiBin = optionValue(args.piBin, '--pi-bin') || process.env.AGENTCRAFT_PI_BIN || '';
+let resolvedPiBin = configuredPiBin || defaultPiBin();
+const piPackage = optionValue(args.piPackage, '--pi-package') || process.env.AGENTCRAFT_PI_PACKAGE || defaultPiPackage();
+const piInstallDir = resolve(optionValue(args.piInstallDir, '--pi-install-dir') || process.env.AGENTCRAFT_PI_INSTALL_DIR || resolve(dataRoot, '.pi-package'));
+const piAutoInstall = !flagEnabled(args.noPiAutoInstall) && process.env.AGENTCRAFT_PI_AUTO_INSTALL !== '0';
 const extraCodexArgs = [
   ...codexArgsFromEnv(process.env.AGENTCRAFT_CODEX_ARGS_JSON),
   ...optionValues(args.codexArg, '--codex-arg'),
+];
+const extraPiArgs = [
+  ...stringArrayFromEnv(process.env.AGENTCRAFT_PI_ARGS_JSON, 'AGENTCRAFT_PI_ARGS_JSON'),
+  ...optionValues(args.piArg, '--pi-arg'),
 ];
 const debugLogging = flagEnabled(args.debug) || process.env.AGENTCRAFT_RUNNER_DEBUG === '1' || isLocalhostUrl(apiBaseUrl);
 const debugEvents = flagEnabled(args.debugEvents) || process.env.AGENTCRAFT_RUNNER_DEBUG_EVENTS === '1';
@@ -56,6 +73,8 @@ const pollIntervalMs = Number(optionValue(args.pollIntervalMs, '--poll-interval-
 const idlePollIntervalMs = Number(optionValue(args.idlePollIntervalMs, '--idle-poll-interval-ms') || process.env.AGENTCRAFT_RUNNER_IDLE_POLL_INTERVAL_MS || 10_000);
 const runnerHeartbeatIntervalMs = Number(optionValue(args.runnerHeartbeatIntervalMs, '--runner-heartbeat-interval-ms') || process.env.AGENTCRAFT_RUNNER_HEARTBEAT_INTERVAL_MS || 10_000);
 const codexExecTimeoutMs = Number(optionValue(args.codexTimeoutMs, '--codex-timeout-ms') || process.env.AGENTCRAFT_CODEX_EXEC_TIMEOUT_MS || 1_200_000);
+const piExecTimeoutMs = Number(optionValue(args.piTimeoutMs, '--pi-timeout-ms') || process.env.AGENTCRAFT_PI_EXEC_TIMEOUT_MS || codexExecTimeoutMs);
+const piInstallTimeoutMs = Number(optionValue(args.piInstallTimeoutMs, '--pi-install-timeout-ms') || process.env.AGENTCRAFT_PI_INSTALL_TIMEOUT_MS || 300_000);
 const codexReconnectFailFastMs = Number(optionValue(args.codexReconnectFailFastMs, '--codex-reconnect-fail-fast-ms') || process.env.AGENTCRAFT_CODEX_RECONNECT_FAIL_FAST_MS || 15_000);
 const maxConcurrentCodexExecs = positiveIntegerOption(
   optionValue(args.maxConcurrentCodexExecs, '--max-concurrent-codex-execs') ||
@@ -90,15 +109,14 @@ let stdinRawModeEnabled = false;
 installSignalHandlers();
 installReadonlyStdin();
 await enableTmuxMouseScrolling();
-await ensureCodexAvailable();
 await heartbeatProjectRunner();
 startProjectRunnerHeartbeat();
 console.log(maxConcurrentCodexExecs > 0
-  ? `Local Codex exec concurrency limit: ${maxConcurrentCodexExecs}.`
-  : 'Local Codex exec concurrency limit: unlimited.');
+  ? `Local Agent exec concurrency limit: ${maxConcurrentCodexExecs}.`
+  : 'Local Agent exec concurrency limit: unlimited.');
 
 if (memberId) {
-  console.log(`Claiming local Codex job from ${apiBaseUrl} for project ${projectId}...`);
+  console.log(`Claiming local agent job from ${apiBaseUrl} for project ${projectId}...`);
   const job = await claimLocalCodexJob(memberId);
   const worker = await startLocalCodexWorker(job, { exitOnFailure: true });
   if (Object.prototype.hasOwnProperty.call(args, 'once')) {
@@ -109,8 +127,8 @@ if (memberId) {
   await pollLoop(worker);
 } else {
   console.log(projectId
-    ? `Starting local Codex project runner for ${projectId}. It will claim every pending local Codex agent in this project.`
-    : 'Starting local Codex account runner. It will claim every pending local Codex agent across your manageable projects.');
+    ? `Starting local agent project runner for ${projectId}. It will claim every pending local CLI agent in this project.`
+    : 'Starting local agent account runner. It will claim every pending local CLI agent across your manageable projects.');
   await supervisorLoop();
 }
 
@@ -157,7 +175,7 @@ async function claimLocalCodexJob(targetMemberId) {
     const claimed = await request(accountClaimPath, { method: 'POST' });
     const job = claimed.job;
     if (!job?.runtimeId) {
-      throw new Error('Claim response did not include a local Codex job.');
+      throw new Error('Claim response did not include a local agent job.');
     }
     return job;
   }
@@ -166,7 +184,7 @@ async function claimLocalCodexJob(targetMemberId) {
   const claimed = await request(useRunnerToken ? runnerClaimPath : claimPath, { method: 'POST' });
   const job = claimed.job;
   if (!job?.runtimeId) {
-    throw new Error('Claim response did not include a local Codex job.');
+    throw new Error('Claim response did not include a local agent job.');
   }
   return job;
 }
@@ -175,7 +193,7 @@ async function startLocalCodexWorker(job, options = {}) {
   job = localizeLocalCodexJob(job);
   const runtimeDir = resolve(dataRoot, job.projectId, `${slug(job.role)}-${job.runtimeId.slice(0, 8)}`);
   try {
-    console.log(`Writing local Codex bundle to ${runtimeDir}...`);
+    console.log(`Writing local agent bundle to ${runtimeDir}...`);
     await rm(runtimeDir, { recursive: true, force: true });
     await mkdir(runtimeDir, { recursive: true });
     for (const file of job.files || []) {
@@ -183,6 +201,7 @@ async function startLocalCodexWorker(job, options = {}) {
       await mkdir(dirname(target), { recursive: true });
       await writeFile(target, file.content || '', 'utf8');
     }
+    await ensureLocalAgentAvailable(job);
 
     await request(localCodexPath(job.projectId, job.memberId, 'complete'), {
       method: 'POST',
@@ -194,7 +213,7 @@ async function startLocalCodexWorker(job, options = {}) {
         status: 'STARTING',
       },
     });
-    console.log('Local Codex worker connected to AgentCraft.');
+    console.log(`${formatAgentTypeLabel(job.agentType)} local worker connected to AgentCraft.`);
   } catch (error) {
     const message = error?.message || String(error);
     console.error(message);
@@ -245,7 +264,7 @@ async function pollLoop(worker) {
       }
       if (Array.isArray(next.syncFiles) && next.syncFiles.length) {
         await writeRuntimeFiles(runtimeDir, next.syncFiles);
-        console.log(`Synced ${next.syncFiles.length} local Codex runtime file(s) from AgentCraft.`);
+        console.log(`Synced ${next.syncFiles.length} local agent runtime file(s) from AgentCraft.`);
       }
       if (!next.request?.id) {
         await sleep(normalizedIdlePollIntervalMs());
@@ -253,8 +272,8 @@ async function pollLoop(worker) {
       }
 
       const requestId = next.request.id;
-      console.log(`Processing local Codex request ${requestId} for ${job.role}...`);
-      debugLogBlock('Accepted AgentCraft local Codex request', {
+      console.log(`Processing local ${formatAgentTypeLabel(job.agentType)} request ${requestId} for ${job.role}...`);
+      debugLogBlock('Accepted AgentCraft local agent request', {
         requestId,
         projectId: job.projectId,
         memberId: job.memberId,
@@ -268,7 +287,7 @@ async function pollLoop(worker) {
       await writeRuntimeFiles(runtimeDir, next.request.files || []);
       await request(localCodexPath(job.projectId, job.memberId, `requests/${requestId}/progress`), {
         method: 'POST',
-        body: { outputText: 'Local Codex picked up the AgentCraft request.' },
+        body: { outputText: `Local ${formatAgentTypeLabel(job.agentType)} picked up the AgentCraft request.` },
       }).catch(() => null);
 
       try {
@@ -276,14 +295,14 @@ async function pollLoop(worker) {
         let outputText = '';
         try {
           outputText = runCodexWithLimit ? await runCodexWithLimit(async () => {
-            await progress.status('Waiting for local Codex execution slot');
-            await progress.status('Running local Codex CLI');
-            return runCodex(job, next.request, runtimeDir, progress);
-          }) : await runCodex(job, next.request, runtimeDir, progress);
+            await progress.status(`Waiting for local ${formatAgentTypeLabel(job.agentType)} execution slot`);
+            await progress.status(`Running local ${formatAgentTypeLabel(job.agentType)} CLI`);
+            return runLocalAgent(job, next.request, runtimeDir, progress);
+          }) : await runLocalAgent(job, next.request, runtimeDir, progress);
         } finally {
           await progress.stop();
         }
-        debugLogBlock('Completed AgentCraft local Codex response', {
+        debugLogBlock('Completed AgentCraft local agent response', {
           requestId,
           outputText,
         });
@@ -292,12 +311,12 @@ async function pollLoop(worker) {
           body: {
             status: 'COMPLETED',
             outputText,
-            recentActions: [{ kind: 'message', name: 'codex', summary: 'Completed by local Codex CLI', status: 'ok' }],
+            recentActions: [{ kind: 'message', name: normalizeAgentType(job.agentType), summary: `Completed by local ${formatAgentTypeLabel(job.agentType)} CLI`, status: 'ok' }],
           },
         });
       } catch (error) {
         const message = error?.message || String(error);
-        debugLogBlock('Failed AgentCraft local Codex response', {
+        debugLogBlock('Failed AgentCraft local agent response', {
           requestId,
           error: message,
         });
@@ -308,7 +327,7 @@ async function pollLoop(worker) {
       }
     } catch (error) {
       if (shouldStopPolling(error)) {
-        console.log(`AgentCraft runtime is no longer available (${error.status || 'closed'}). Stopping local Codex worker.`);
+        console.log(`AgentCraft runtime is no longer available (${error.status || 'closed'}). Stopping local agent worker.`);
         return;
       }
       console.error(error?.message || String(error));
@@ -354,7 +373,7 @@ async function shutdown(reason) {
   if (shuttingDown) return;
   shuttingDown = true;
   restoreStdinMode();
-  console.log(`Stopping local Codex runner (${reason})...`);
+  console.log(`Stopping local agent runner (${reason})...`);
   if (projectRunnerHeartbeatTimer) clearInterval(projectRunnerHeartbeatTimer);
   await Promise.allSettled(
     [...activeWorkers.values()].map((worker) => disconnectLocalCodexWorker(worker, reason)),
@@ -368,7 +387,7 @@ async function disconnectLocalCodexWorker(worker, reason) {
     method: 'POST',
     body: {
       reason,
-      message: 'Local Codex runner stopped. Restart the project runner to reconnect this runtime.',
+      message: 'Local agent runner stopped. Restart the project runner to reconnect this runtime.',
     },
   }).catch((error) => {
     if (!shouldStopPolling(error)) {
@@ -396,7 +415,7 @@ async function heartbeatProjectRunner() {
   return request(heartbeatPath, {
     method: 'POST',
     body: {
-      name: 'Local Codex runner',
+      name: 'Local Agent runner',
       platform: `${process.platform}/${process.arch}`,
       version: '1',
     },
@@ -411,7 +430,7 @@ async function disconnectProjectRunner(reason) {
     method: 'POST',
     body: {
       reason,
-      name: 'Local Codex runner',
+      name: 'Local Agent runner',
       platform: `${process.platform}/${process.arch}`,
       version: '1',
     },
@@ -444,12 +463,57 @@ async function ensureCodexAvailable() {
   try {
     await checkCommand(codexBin, ['--version']);
   } catch (error) {
-    fail([
-      `Codex CLI is required for local Codex runner, but "${codexBin}" could not be executed.`,
+    throw new Error([
+      `Codex CLI is required for Codex local agent jobs, but "${codexBin}" could not be executed.`,
       'Install and sign in to Codex CLI, make sure it is on PATH, or pass --codex-bin <path> / set AGENTCRAFT_CODEX_BIN.',
       error?.message ? `Details: ${error.message}` : '',
     ].filter(Boolean).join('\n'));
   }
+}
+
+async function ensureLocalAgentAvailable(job) {
+  const agentType = normalizeAgentType(job.agentType);
+  if (agentType === 'codex') {
+    await ensureCodexAvailable();
+    return;
+  }
+  if (agentType === 'pi') {
+    await ensurePiAvailable();
+    return;
+  }
+  throw new Error(`Local Agent runner does not support agent type "${job.agentType || 'unknown'}" yet.`);
+}
+
+async function ensurePiAvailable() {
+  try {
+    await checkCommand(resolvedPiBin, ['--version']);
+    return;
+  } catch (error) {
+    if (configuredPiBin || !piAutoInstall) {
+      throw new Error([
+        `Pi CLI is required for local Pi runner, but "${resolvedPiBin}" could not be executed.`,
+        'Install Pi, make sure it is on PATH, or pass --pi-bin <path> / set AGENTCRAFT_PI_BIN.',
+        error?.message ? `Details: ${error.message}` : '',
+      ].filter(Boolean).join('\n'));
+    }
+  }
+
+  await checkCommand('npm', ['--version']).catch((error) => {
+    throw new Error([
+      'Pi CLI was not found and npm is required to install the Pi package automatically.',
+      'Install Node.js/npm, install Pi yourself, or pass --pi-bin <path>.',
+      error?.message ? `Details: ${error.message}` : '',
+    ].filter(Boolean).join('\n'));
+  });
+  await mkdir(piInstallDir, { recursive: true });
+  console.log(`Installing Pi package ${piPackage} into ${piInstallDir}...`);
+  await execFile('npm', ['install', '--prefix', piInstallDir, '--ignore-scripts', piPackage], '', {
+    timeoutMs: Number.isFinite(piInstallTimeoutMs) && piInstallTimeoutMs > 0 ? piInstallTimeoutMs : 0,
+    onStdout: (text) => process.stderr.write(text),
+    onStderr: (text) => process.stderr.write(text),
+  });
+  resolvedPiBin = resolve(piInstallDir, 'node_modules', '.bin', process.platform === 'win32' ? 'pi.cmd' : 'pi');
+  await checkCommand(resolvedPiBin, ['--version']);
 }
 
 function createCodexProgressReporter(job, requestId) {
@@ -508,6 +572,13 @@ function createCodexProgressReporter(job, requestId) {
   };
 }
 
+async function runLocalAgent(job, request, cwd, progress) {
+  const agentType = normalizeAgentType(job.agentType);
+  if (agentType === 'codex') return runCodex(job, request, cwd, progress);
+  if (agentType === 'pi') return runPi(job, request, cwd, progress);
+  throw new Error(`Local Agent runner does not support agent type "${job.agentType || 'unknown'}" yet.`);
+}
+
 async function runCodex(job, request, cwd, progress) {
   const outputPath = resolve(cwd, `.codex-output-${request.id}.txt`);
   const prompt = buildCodexPrompt(job, request);
@@ -561,6 +632,76 @@ async function runCodex(job, request, cwd, progress) {
   reportCodexStream.flush();
   const finalMessage = await readFile(outputPath, 'utf8').catch(() => '');
   return finalMessage.trim() || reportCodexStream.outputText().trim() || (!codexJsonStream ? stdout.trim() : '') || stderr.trim() || '(Codex completed without text output)';
+}
+
+async function runPi(job, request, cwd, progress) {
+  await ensurePiAvailable();
+  const piAgentDir = resolve(cwd, '.pi', 'agent');
+  const piSessionDir = resolve(cwd, '.pi', 'sessions', safePathSegment(job.runtimeId, 'runtime'));
+  const piSessionFile = resolve(piSessionDir, `${safePathSegment(request.payload?.agentcraft?.conversationId || request.payload?.conversation || request.id, 'conversation')}.jsonl`);
+  await mkdir(piAgentDir, { recursive: true });
+  await mkdir(piSessionDir, { recursive: true });
+  const prompt = buildPiPrompt(job, request);
+  const modelName =
+    optionValue(args.piModel, '--pi-model') ||
+    process.env.AGENTCRAFT_PI_MODEL ||
+    job.llm?.modelName ||
+    request.payload?.model ||
+    'agentcraft-model';
+  const providerName = process.env.AGENTCRAFT_PI_PROVIDER || job.env?.AGENTCRAFT_PI_PROVIDER || 'agentcraft';
+  const piArgs = [
+    '--mode',
+    'json',
+    '--session-dir',
+    piSessionDir,
+    '--session',
+    piSessionFile,
+    '--provider',
+    providerName,
+    '--model',
+    modelName,
+    ...extraPiArgs,
+    '-p',
+  ];
+  debugLogBlock('Starting Pi CLI', {
+    requestId: request.id,
+    cwd,
+    command: resolvedPiBin,
+    args: piArgs,
+    piAgentDir,
+  });
+  const reportPiStream = createPiStreamReporter(progress);
+  const { stdout, stderr } = await execFile(resolvedPiBin, piArgs, prompt, {
+    cwd,
+    timeoutMs: Number.isFinite(piExecTimeoutMs) && piExecTimeoutMs > 0 ? piExecTimeoutMs : 0,
+    env: {
+      ...process.env,
+      ...(job.env || {}),
+      PI_CODING_AGENT_DIR: piAgentDir,
+      PI_CODING_AGENT_SESSION_DIR: piSessionDir,
+      AGENTCRAFT_LOCAL_CODEX: 'true',
+      AGENTCRAFT_LOCAL_AGENT: 'true',
+      AGENTCRAFT_PROJECT_ID: job.projectId,
+      AGENTCRAFT_MEMBER_ID: job.memberId,
+      AGENTCRAFT_RUNTIME_ID: job.runtimeId,
+      AGENT_WORKSPACE_TOKEN: job.workspaceToken,
+      AIFACTORY_RUNTIME_TOKEN: job.workspaceToken,
+      AIFACTORY_API_BASE_URL: job.projectApiBaseUrl || apiBaseUrl,
+      AGENT_WORKSPACE_BASE_URL: job.workspaceBaseUrl,
+      API_SERVER_MODEL_NAME: modelName,
+      AGENTCRAFT_MODEL_API_KEY: job.llm?.apiKey || job.env?.AGENTCRAFT_MODEL_API_KEY || process.env.AGENTCRAFT_MODEL_API_KEY || '',
+    },
+    onStdout: reportPiStream.stdout,
+    onStderr: reportPiStream.stderr,
+  });
+  const sessionOutput = await readFile(piSessionFile, 'utf8').catch(() => '');
+  const summary = extractPiJsonSummary([stdout, sessionOutput].filter(Boolean).join('\n'));
+  if (summary.error) throw new Error(`Pi model response failed: ${summary.error}`);
+  const outputText = summary.text || reportPiStream.outputText().trim() || stderr.trim();
+  if (!outputText) {
+    throw new Error('Pi completed without model output. Check the selected Model API config and the local Pi models.json generated for this runtime.');
+  }
+  return outputText;
 }
 
 function createCodexStreamReporter(progress, reconnectFailFastMs) {
@@ -658,10 +799,176 @@ function createCodexStreamReporter(progress, reconnectFailFastMs) {
     },
     abortMessage() {
       return exhaustedReconnectStatus
-        ? `Codex backend reconnect exhausted (${exhaustedReconnectStatus}). Restart the local Codex runner after the Codex app/API connection recovers.`
+        ? `Codex backend reconnect exhausted (${exhaustedReconnectStatus}). Restart the local agent runner after the Codex app/API connection recovers.`
         : '';
     },
   };
+}
+
+function createPiStreamReporter(progress) {
+  const parser = createPiJsonProgressParser((text) => {
+    void progress?.output(text);
+  });
+  let lastStatusText = '';
+  let outputText = '';
+
+  const status = (text) => {
+    const cleaned = cleanStatusText(text);
+    if (!cleaned || cleaned === lastStatusText) return;
+    lastStatusText = cleaned;
+    void progress?.status(cleaned);
+  };
+
+  return {
+    stdout(text) {
+      parser.push(text);
+      const visible = parser.visibleText();
+      if (visible) outputText = visible;
+    },
+    stderr(text) {
+      status(text);
+    },
+    outputText() {
+      const visible = parser.finish();
+      if (visible) outputText = visible;
+      return outputText;
+    },
+  };
+}
+
+function applyPiJsonEventToState(event, state) {
+  const message = event?.message;
+  if (!message || message.role !== 'assistant') return;
+  const type = String(event?.type || '');
+  if (!['message', 'message_start', 'message_update', 'message_end', 'turn_end'].includes(type)) return;
+  const errorMessage = (
+    message?.errorMessage ||
+    event?.errorMessage ||
+    message?.error?.message ||
+    event?.error?.message ||
+    ''
+  ).toString().trim();
+  const stopReason = String(message?.stopReason || event?.stopReason || '').toLowerCase();
+  if ((errorMessage || stopReason === 'error') && Array.isArray(state.errorMessages)) {
+    const value = errorMessage || 'Pi model response failed.';
+    if (!state.errorMessages.includes(value)) state.errorMessages.push(value);
+  }
+  const id = piJsonMessageId(event, state);
+  if (!state.messageOrder.includes(id)) {
+    state.messageOrder.push(id);
+    state.nextAssistantIndex += 1;
+  }
+  state.currentAssistantId = id;
+  const text = extractAssistantText(message.content).trim();
+  if (text) state.assistantMessages.set(id, text);
+}
+
+function createPiJsonState() {
+  return {
+    currentAssistantId: '',
+    nextAssistantIndex: 0,
+    messageOrder: [],
+    assistantMessages: new Map(),
+    errorMessages: [],
+  };
+}
+
+function piJsonVisibleText(state) {
+  return state.messageOrder
+    .map((id) => state.assistantMessages.get(id))
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
+}
+
+function createPiJsonProgressParser(onProgress) {
+  const state = {
+    ...createPiJsonState(),
+    buffer: '',
+    lastVisibleText: '',
+  };
+
+  const consumeLine = (line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    let event;
+    try {
+      event = JSON.parse(trimmed);
+    } catch {
+      return;
+    }
+    applyPiJsonEventToState(event, state);
+    const visibleText = piJsonVisibleText(state);
+    if (visibleText && visibleText !== state.lastVisibleText) {
+      state.lastVisibleText = visibleText;
+      onProgress(visibleText);
+    }
+  };
+
+  return {
+    push(chunk) {
+      state.buffer += chunk;
+      const lines = state.buffer.split(/\r?\n/);
+      state.buffer = lines.pop() || '';
+      lines.forEach(consumeLine);
+    },
+    finish() {
+      if (state.buffer.trim()) consumeLine(state.buffer);
+      state.buffer = '';
+      return state.lastVisibleText;
+    },
+    visibleText() {
+      return state.lastVisibleText;
+    },
+  };
+}
+
+function extractPiJsonSummary(output) {
+  const state = createPiJsonState();
+  for (const line of String(output || '').split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      applyPiJsonEventToState(JSON.parse(line), state);
+    } catch {
+      // Ignore non-event output mixed into the stream.
+    }
+  }
+  return {
+    text: piJsonVisibleText(state),
+    error: state.errorMessages.join('\n').trim(),
+  };
+}
+
+function extractAssistantText(value) {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => {
+        if (typeof item === 'string') return item;
+        if (!item || typeof item !== 'object') return '';
+        if (item.type && item.type !== 'text') return '';
+        if (typeof item.text === 'string') return item.text;
+        if (typeof item.content === 'string') return item.content;
+        return '';
+      })
+      .filter(Boolean)
+      .join('');
+  }
+  if (value && typeof value === 'object') {
+    return extractAssistantText(value.content || value.text || '');
+  }
+  return '';
+}
+
+function piJsonMessageId(event, state) {
+  return String(
+    event?.message?.id ||
+    event?.message?.responseId ||
+    event?.responseId ||
+    event?.id ||
+    state.currentAssistantId ||
+    `assistant-${state.nextAssistantIndex}`,
+  );
 }
 
 function isExhaustedReconnectStatus(statusText) {
@@ -762,16 +1069,27 @@ function firstString(...values) {
 }
 
 function buildCodexPrompt(job, request) {
+  return buildLocalAgentPrompt('Codex', job, request);
+}
+
+function buildPiPrompt(job, request) {
+  return buildLocalAgentPrompt('Pi', job, request);
+}
+
+function buildLocalAgentPrompt(agentName, job, request) {
   return [
-    'You are a local Codex worker connected to an AgentCraft project.',
+    `You are a local ${agentName} worker connected to an AgentCraft project.`,
     '',
     'Use the files in this runtime bundle for project context. Important files:',
     '- AGENT_WORKSPACE_CONTEXT.json',
     '- AGENT_WORKSPACE_RUNTIME.env',
     '- skills/',
     '',
-    'This runner starts Codex with the runtime bundle as the current working directory.',
-    'When skill examples mention /opt/data/AGENT_WORKSPACE_RUNTIME.env, use ./AGENT_WORKSPACE_RUNTIME.env in this local Codex bundle instead.',
+    `This runner starts ${agentName} with the runtime bundle as the current working directory.`,
+    'Local path override: do not create or use /opt/data, /opt/data/workspace, or other container-only paths. Those paths may appear in nested runtime instructions for Docker agents, but this local CLI runner is not inside that container.',
+    'Use the current working directory as the local runtime bundle workspace. For scratch files, write relative paths under this directory. For required project shared-file outputs such as deliverables/... or reports/..., use ./skills/agent-workspace/scripts/project-files.sh or the $AGENT_WORKSPACE_BASE_URL /files/write API instead of local filesystem writes.',
+    'When skill examples mention /opt/data/skills, use ./skills in this local agent bundle instead.',
+    'When skill examples mention /opt/data/AGENT_WORKSPACE_RUNTIME.env, use ./AGENT_WORKSPACE_RUNTIME.env in this local agent bundle instead.',
     'Before any shell/API command, source ./AGENT_WORKSPACE_RUNTIME.env in the same command, or use the AGENT_WORKSPACE_* and AIFACTORY_* environment variables already exported by this runner.',
     'For project board, feature, work item, memory, and file writes, prefer $AGENT_WORKSPACE_BASE_URL/v1/... with Authorization: Bearer $AGENT_WORKSPACE_TOKEN.',
     'For host runtime launch/dispatch helpers, use $AIFACTORY_API_BASE_URL exactly as provided with Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN. Do not prepend another /api segment if the base URL already ends with /api.',
@@ -1027,10 +1345,14 @@ function isLocalhostUrl(value) {
 function debugLogBlock(title, value) {
   if (!debugLogging) return;
   const rendered = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-  console.error(`\n[AgentCraft local Codex debug] ${title}\n${rendered}\n`);
+  console.error(`\n[AgentCraft local agent debug] ${title}\n${rendered}\n`);
 }
 
 function codexArgsFromEnv(value) {
+  return stringArrayFromEnv(value, 'AGENTCRAFT_CODEX_ARGS_JSON');
+}
+
+function stringArrayFromEnv(value, name) {
   if (!value) return [];
   try {
     const parsed = JSON.parse(value);
@@ -1040,7 +1362,7 @@ function codexArgsFromEnv(value) {
   } catch {
     // Fall through to the explicit error below.
   }
-  fail('AGENTCRAFT_CODEX_ARGS_JSON must be a JSON array of strings, for example ["--ignore-user-config","--disable","plugins"].');
+  fail(`${name} must be a JSON array of strings, for example ["--ignore-user-config","--disable","plugins"].`);
 }
 
 function positiveIntegerOption(value, fallback) {
@@ -1084,6 +1406,33 @@ function safeJoin(base, relativePath) {
   return target;
 }
 
+function safePathSegment(value, fallback) {
+  const safe = String(value || '')
+    .trim()
+    .replace(/[^A-Za-z0-9._-]/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 160);
+  return safe || fallback;
+}
+
+function normalizeAgentType(agentType) {
+  const normalized = String(agentType || '').trim().toLowerCase().replace(/_/g, '-');
+  if (['pi', 'pi-agent'].includes(normalized)) return 'pi';
+  if (['codex', 'codex-agent'].includes(normalized)) return 'codex';
+  return normalized || 'codex';
+}
+
+function formatAgentTypeLabel(agentType) {
+  const normalized = normalizeAgentType(agentType);
+  if (normalized === 'pi') return 'Pi';
+  if (normalized === 'codex') return 'Codex';
+  return normalized
+    .split(/[-\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ') || 'Agent';
+}
+
 function slug(value) {
   return String(value || 'agent').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'agent';
 }
@@ -1093,11 +1442,19 @@ function trimSlash(value) {
 }
 
 function defaultDataRoot() {
-  return resolve(homedir(), '.agentcraft', 'local-codex');
+  return resolve(homedir(), '.agentcraft', 'local-agent');
 }
 
 function defaultCodexBin() {
   return 'codex';
+}
+
+function defaultPiBin() {
+  return 'pi';
+}
+
+function defaultPiPackage() {
+  return '@earendil-works/pi-coding-agent';
 }
 
 function sleep(ms) {

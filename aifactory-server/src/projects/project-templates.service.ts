@@ -138,16 +138,24 @@ function normalizeRuntimeCompatibility(value: any): ProjectTemplateRuntimeCompat
 
 const FALLBACK_DEFAULT_TEMPLATE: ProjectTemplateConfig = {
   id: DEFAULT_TEMPLATE_ID,
-  label: 'Default Project Template',
+  label: 'General Project Template',
   description:
-    'Built-in fallback default project template used when the agent-workspace project-templates directory is unavailable.',
+    'Built-in fallback general-purpose project template used when the agent-workspace project-templates directory is unavailable.',
   version: '0.1',
   settings: {
     maxActiveAgents: 10,
     maxActiveGoals: 5,
   },
-  roleLaunchProfiles: [],
-  projectFileFolders: [],
+  roleLaunchProfiles: [
+    { role: 'LEAD_AGENT', launchMode: 'local-docker', agentType: 'pi', deploymentDays: 1 },
+    { role: 'PLANNER_AGENT', launchMode: 'local-docker', agentType: 'pi', deploymentDays: 1 },
+    { role: 'WORKER_AGENT', launchMode: 'local-docker', agentType: 'pi', deploymentDays: 1 },
+    { role: 'REVIEW_AGENT', launchMode: 'local-docker', agentType: 'pi', deploymentDays: 1 },
+    { role: 'SECURITY_AUDITOR', launchMode: 'local-docker', agentType: 'pi', deploymentDays: 1 },
+    { role: 'PM_AGENT', launchMode: 'local-docker', agentType: 'pi', deploymentDays: 1 },
+    { role: 'INTEGRATOR_AGENT', launchMode: 'local-docker', agentType: 'pi', deploymentDays: 1 },
+  ],
+  projectFileFolders: ['inputs', 'research', 'work', 'deliverables', 'reviews', 'coordination', 'scratch'],
   roles: [
     { ...DEFAULT_OWNER_TEMPLATE_ROLE },
     { ...DEFAULT_LEAD_TEMPLATE_ROLE },

@@ -4,6 +4,7 @@ import { JwtService } from '@nestjs/jwt';
 import { Response } from 'express';
 import { OAuthUser } from './types/oauth-user';
 import { signOAuthState, verifyOAuthState } from './oauth-state';
+import { resolveOAuthRedirectUrl } from './oauth-redirect';
 
 interface XUserResponse {
   data?: {
@@ -28,14 +29,14 @@ export class XOAuthService {
       throw new ConflictException('X OAuth is not configured');
     }
 
-    const callbackUrl = process.env.X_CALLBACK_URL || 'http://localhost:3000/api/auth/x/callback';
+    const callbackUrl = process.env.X_CALLBACK_URL || 'http://localhost:3100/api/auth/x/callback';
     const codeVerifier = this.generateCodeVerifier();
     const nonce = randomBytes(16).toString('hex');
     const state = signOAuthState(this.jwtService, {
       type: 'oauth',
       provider: 'x',
       mode: 'login',
-      redirect: redirect || process.env.OAUTH_REDIRECT_URL || 'http://localhost:5173/oauth/callback',
+      redirect: resolveOAuthRedirectUrl(redirect),
       xNonce: nonce,
     });
     const codeChallenge = this.base64UrlEncode(createHash('sha256').update(codeVerifier).digest());
@@ -71,7 +72,7 @@ export class XOAuthService {
       throw new UnauthorizedException('Missing X OAuth verifier');
     }
 
-    const callbackUrl = process.env.X_CALLBACK_URL || 'http://localhost:3000/api/auth/x/callback';
+    const callbackUrl = process.env.X_CALLBACK_URL || 'http://localhost:3100/api/auth/x/callback';
     const token = await this.exchangeCodeForToken(code, codeVerifier, callbackUrl);
     const profile = await this.fetchProfile(token.access_token);
     const xUser = profile.data;

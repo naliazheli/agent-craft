@@ -31,7 +31,7 @@ const steps = [
   },
   {
     title: 'Launch Local Agent',
-    detail: 'Click Local Agent and queue a local Codex runtime for the lead.',
+    detail: 'Click Local Agent and queue a local CLI runtime for the lead.',
     icon: Brain,
   },
   {
@@ -208,7 +208,7 @@ export function LocalAgentDemoSection() {
                       </div>
                       <p className="text-sm font-medium text-white">This lead agent is ready, but no runtime is running yet.</p>
                       <p className="mt-1 text-xs leading-5 text-white/50">
-                        Launch a runtime before opening the chat. Choose Local Agent for a Codex CLI session.
+                        Launch a runtime before opening the chat. Choose Local Agent for a local CLI session.
                       </p>
                       <div className="mt-4 flex flex-wrap justify-center gap-2">
                         <button className="inline-flex h-9 items-center gap-2 rounded-md border border-white/10 bg-white/[0.08] px-3 text-sm text-white/70">
