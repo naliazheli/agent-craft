@@ -1826,6 +1826,11 @@ export const api = {
           method: 'POST',
           body: JSON.stringify(data),
         }),
+      delete: (projectId: string, goalId: string, data: { confirmation: string; cascade?: boolean }) =>
+        request<any>(`/projects/${projectId}/goals/${goalId}`, {
+          method: 'DELETE',
+          body: JSON.stringify(data),
+        }),
       globals: {
         list: (projectId: string, goalId: string) =>
           request<{ projectId: string; goalId: string; globals: ProjectGlobalVariable[] }>(

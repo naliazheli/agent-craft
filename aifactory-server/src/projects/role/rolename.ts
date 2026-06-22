@@ -476,6 +476,29 @@ export const ROLE_NAME_CANDIDATES: Record<string, string[]> = {
     "Casey Muratori"
   ],
 
+  AGGREGATOR_AGENT: [
+    "Aristotle",
+    "Francis Bacon",
+    "Ibn Sina",
+    "Al-Khwarizmi",
+    "Ada Lovelace",
+    "Mary Somerville",
+    "Florence Nightingale",
+    "Vannevar Bush",
+    "Claude Shannon",
+    "Herbert Simon",
+    "Peter Drucker",
+    "Donella Meadows",
+    "Elinor Ostrom",
+    "Jane Jacobs",
+    "Rachel Carson",
+    "Daniel Kahneman",
+    "Amartya Sen",
+    "James March",
+    "Barbara Minto",
+    "Edward Tufte"
+  ],
+
   INTEGRATOR_AGENT: [
     "Tim Berners-Lee",
     "Vint Cerf",

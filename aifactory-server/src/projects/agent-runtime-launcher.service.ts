@@ -2515,7 +2515,7 @@ export class AgentRuntimeLauncherService {
       `Mounted entrypoint: ${mountedDir}/SKILL.md.`,
       metadata.description ? `Description: ${metadata.description}` : '',
       scriptPaths.length ? `Mounted helper scripts: ${scriptPaths.join(', ')}.` : '',
-      `Read ${mountedDir}/SKILL.md only when this turn needs that skill's detailed workflow. Resolve relative files and scripts from ${mountedDir}.`,
+      `For routine startup, resume, assignment intake, or simple status work, do not read the full ${mountedDir}/SKILL.md; use this summary plus the runtime instructions. Read ${mountedDir}/SKILL.md only when this turn needs that skill's detailed workflow, and read one relevant skill at a time. Resolve relative files and scripts from ${mountedDir}.`,
     ].filter(Boolean).join('\n');
   }
 

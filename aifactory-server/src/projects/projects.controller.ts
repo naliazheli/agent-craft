@@ -26,6 +26,7 @@ import {
   CreateProjectAssignmentDto,
   CreateProjectDto,
   CreateProjectFromTaskDto,
+  DeleteProjectGoalDto,
   DeleteProjectDto,
   CreateProjectFeatureDto,
   CreateProjectGoalDto,
@@ -879,6 +880,20 @@ export class ProjectsController {
     @Body() dto: CloseProjectGoalDto,
   ) {
     return this.projectsService.closeGoal(projectId, goalId, req.user.id, dto);
+  }
+
+  @Delete(':id/goals/:goalId')
+  @ApiOperation({
+    summary:
+      'Delete a project goal after optionally cascading cancellation of linked unfinished work.',
+  })
+  deleteGoal(
+    @Param('id') projectId: string,
+    @Param('goalId') goalId: string,
+    @Request() req: any,
+    @Body() dto: DeleteProjectGoalDto,
+  ) {
+    return this.projectsService.deleteGoal(projectId, goalId, req.user.id, dto);
   }
 
   @Post(':id/goals/:goalId/reopen')

@@ -157,6 +157,21 @@ export class DeleteProjectDto {
   confirmation!: string;
 }
 
+export class DeleteProjectGoalDto {
+  @ApiProperty({ example: 'delete' })
+  @IsString()
+  confirmation!: string;
+
+  @ApiPropertyOptional({
+    example: true,
+    description:
+      'If true (default), cancel all non-terminal downstream work before deleting the goal record.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  cascade?: boolean;
+}
+
 export class SaveProjectTemplateDto {
   @ApiPropertyOptional({ example: 'My legal review team template' })
   @IsOptional()

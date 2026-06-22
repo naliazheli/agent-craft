@@ -72,6 +72,15 @@ type EnglishDocSectionContent = {
   code?: string;
 };
 
+type GoalTopologyDiagramCopy = {
+  flowTitle: string;
+  flowDescription: string;
+  relationshipTitle: string;
+  relationshipDescription: string;
+  modesLabel: string;
+  modesDescription: string;
+};
+
 const topNav: NavItem[] = [
   { id: 'quick-start', label: '快速开始', href: '#overview', icon: BookOpen },
   { id: 'project', label: 'AgentCraft Project', href: '#project', icon: FolderKanban },
@@ -1051,6 +1060,40 @@ const ownerWorkRows: Array<[string, string]> = [
   ['保持边界', 'Owner 不需要亲自派发 worker，也不需要替 agent 写产物。Owner 负责给目标、给资源、给决策；Lead 和 Coordinator 负责拆解与派发。'],
 ];
 
+const localPracticeSteps = [
+  {
+    title: '1. 模型配置',
+    body: '在 /agent/config 保存 OpenAI-compatible 配置。API URL 填你当前可用的模型代理地址，Model Name 填实际模型名；API key 不会在列表页明文展示。',
+    src: '/docs-assets/quick-start/01-model-config.png',
+    alt: 'AgentCraft LLM Settings page showing Local Pi mimo-v2.5-pro as the current model config',
+  },
+  {
+    title: '2. 创建项目与高级参数',
+    body: '在 /projects 输入 owner-level goal，模板选择 General Project Template (default)。展开 Advanced Options，Coordinator launch 选择 Local Agent，Preferred agent type 选择 Pi，再按需要调整并发与 dispatch 参数。',
+    src: '/docs-assets/quick-start/02-create-project-advanced.png',
+    alt: 'AgentCraft Create Project form showing the Internet garbage picking goal and Local Agent Pi advanced options',
+  },
+  {
+    title: '3. 从 Lead Agent 复制 runner 命令',
+    body: '创建后进入 Project Members，选中 Lead Agent，打开 Command 面板并复制系统生成的本机 runner 命令，在仓库根目录粘贴运行。不要手写 API、project id、账号或 token 参数；runner claim 后 Lead 会从 waiting local codex 变成 idle。',
+    src: '/docs-assets/quick-start/04-project-members-normal.png',
+    alt: 'AgentCraft Project Members page showing the Lead agent idle and other agents running without runtime errors',
+  },
+  {
+    title: '4. Run polling 与拿结果',
+    body: 'Lead 变成 idle 后点击 Run polling now。成功时 Lead 会读取 goal frontier，创建或修正 READY work items，并让 Coordinator/Worker/Planner/Review 按规则推进。结果入口在 Plan、Work Items、Resources、Delivery、Memory；要追加目标，在 Home 或 Plan 用 New Goal / Create Goal。',
+    src: '/docs-assets/quick-start/03-project-home-results.png',
+    alt: 'AgentCraft Project Home showing New Goal, current goals, collaboration flow, and delivery lanes',
+  },
+];
+
+const localPracticeTroubleshootingRows: Array<[string, string]> = [
+  ['waiting local codex', '这不是 Lead 卡死，而是本机 runner 还没用 Command 面板里的命令 claim 到项目。复制 Lead Agent Command 面板生成的命令并运行；连接后刷新 Project Members，应看到 Lead 变为 idle。'],
+  ['Runtime error', '先看成员详情顶部 Runtime error 和 runner 终端输出。常见原因是模型配置不可用、API key 无效、模型名不匹配，或本地 runner 被停止。'],
+  ['Work Items 仍为 0', '通常表示 Lead 还没有成功跑过 polling。先修 runtime error，再点击 Run polling now；如果项目需要自动推进，把项目 Activate 并开启 Lead timed polling。'],
+  ['Owner Action Items', '如果 Home 出现资源请求或确认卡片，Owner 先补资源或确认。完成后再触发 Lead / Coordinator，否则依赖该资源的 worker 不应该被派发。'],
+];
+
 const homeActionShapeRows: Array<[string, string]> = [
   ['Project summary', 'Home 顶部展示项目状态、visibility、brief/summary、goals、feature groups、work items 和 memories 统计，帮助 Owner 先判断项目整体是否还在正确方向。'],
   ['Owner Action Items', 'Home 会把需要人处理的 ownerResourceWorkItems、ownerActionWorkItems 和其它 owner-owned items 放在前面；资源和确认都有独立数量 badge。'],
@@ -1131,6 +1174,31 @@ const goalTopologyModes = [
   'ITERATIVE_REVIEW',
 ];
 
+const goalTopologyDiagramCopy: Record<DocsLanguage, GoalTopologyDiagramCopy> = {
+  zh: {
+    flowTitle: 'Lead Polling / Goal Completion Flow',
+    flowDescription:
+      '完整控制流：Lead 被定时或事件唤醒，读取 lead.md 和 ledger，做 bounded frontier review，判断 topology，创建最小缺口 item，经依赖硬门、Coordinator 派发、结构化 Review、Fan-in，必要时由 Aggregator 汇总，最后关闭 Goal。',
+    relationshipTitle: 'Goal / Item / Role Relationship Map',
+    relationshipDescription:
+      '对象关系图：Project、Goal、WorkItem、Role、Coordinator、Lead workspace、Resource、File、Review、Memory 之间的持久关系。',
+    modesLabel: '拓扑模式：',
+    modesDescription:
+      'Coordinator 只负责调度，Goal 是否完成仍由 Lead polling 根据 accepted items、resource gate、review 和 aggregation gate 判断。',
+  },
+  en: {
+    flowTitle: 'Lead Polling / Goal Completion Flow',
+    flowDescription:
+      'Full control flow: Lead wakes on a timer or event, reads lead.md and the ledger, reviews the bounded frontier, classifies topology, creates the smallest missing item, sends work through dependency gates, Coordinator dispatch, structured Review, Fan-in, optional Aggregator synthesis, and finally closes the Goal.',
+    relationshipTitle: 'Goal / Item / Role Relationship Map',
+    relationshipDescription:
+      'Persistent relationships among Project, Goal, WorkItem, Role, Coordinator, Lead workspace, Resource, File, Review, and Memory.',
+    modesLabel: 'Topology modes:',
+    modesDescription:
+      'Coordinator dispatches work; Lead polling still decides goal completion from accepted items, resource gates, review, and aggregation gates.',
+  },
+};
+
 const goalTopologyFlowMermaid = String.raw`flowchart TD
   pollTimer["Lead polling config\nIDLE_ONLY or fixed interval"]
   projectEvent["Project events\nitem accepted, resource completed, review resolved, assignment failed"]
@@ -1143,31 +1211,39 @@ const goalTopologyFlowMermaid = String.raw`flowchart TD
   summaryRead["Bounded summary reads\ngoals, linked item summaries, assignments, events"]
   attentionGate{"Digest unchanged and no lead attention item?"}
   detailRead["Targeted detail reads\nonly attention items, candidate DONE, deps, reviews, files"]
-  topologyGate{"Which completion topology fits?"}
+  topologyGate{"Which completion topology fits?\nDIRECT / SERIAL / FAN_OUT_FAN_IN\nTOTAL_TO_PARTS / TOTAL_PARTS_TOTAL / ITERATIVE_REVIEW"}
   resourceGate{"Required resources and owner decisions present?"}
   resourceItem["Owner-owned resource/action item\ninputPacket.resourceRequest or ownerAction"]
-  directReady{"Accepted output already satisfies goal?"}
-  serialNext["Create next serial work item\nsmallest executable step"]
+  currentEnough{"Accepted upstream outputs\nalready satisfy goal?"}
+  aggregationNeeded{"Goal requires combined deliverable?"}
   plannerNeed{"Need decomposition plan?"}
-  plannerItem["Planning work item\ntopology, lanes, deps, output contracts"]
-  planner["Planner proposes item topology\nparts, deps, aggregation contract"]
-  leadPlan["Lead validates item set sufficiency\nbefore expanding work"]
-  createParts["Create READY part/collection items\nbounded slices or phases"]
-  coordinator["Coordinator dispatches READY items\nrole rules, capacity, runtime fit"]
-  workers["Workers execute bounded items\none slice, phase, or revision"]
+  plannerItem["Planning work item\nworkType PLANNING\nno execution side effects"]
+  dependencyGate{"Dependency gate\nall dependsOn items completed/accepted?"}
+  dependencyBlocked["Hold item\nlog DEPENDENCIES_UNMET\nno assignment or claim"]
+  coordinator["Coordinator dispatches eligible items\nstatus/workType rules, role caps, runtime fit"]
+  roleRoute{"Role route\nfrom template dispatchRules"}
+  planner["Planner proposes topology\nlanes, dependsOn, output contracts,\naggregation contract"]
+  topologyProposal["Topology proposal artifact\nplan plus candidate item set"]
+  leadPlan["Lead validates topology\ncreates only missing items"]
+  createWork["Create direct/serial work item\nREADY or NEEDS_REVISION\nsmallest executable unit"]
+  createParts["Create parallel part items\nREADY with output contracts"]
+  aggregationItem["Aggregation/synthesis/delivery item\nworkType AGGREGATION/SYNTHESIS/REPORT/DELIVERY/DECISION_PACKAGE\ndependsOn accepted upstream items"]
+  workers["Worker executes bounded item\none slice, step, or revision"]
+  aggregator["Aggregator Agent executes\nreads accepted upstream files/items\npreserves links and caveats"]
   files["Shared project files\ninputs, evidence, outputs, deliverables"]
-  handoff["Worker handoff\nfiles, verification, blockers, memoryCandidates"]
-  review["Reviewer checks artifact vs contract"]
-  accepted{"Item accepted?"}
+  aggregateOutput["Combined deliverable\nreport, release package, recommendation,\nor decision memo"]
+  handoff["Handoff/artifact\nfile paths, verification, blockers,\nmemoryCandidates"]
+  reviewQueue["Assignment complete -> IN_REVIEW\nreview-routed by template"]
+  reviewer["Review Agent checks artifact\nagainst outputContract and acceptanceCriteria"]
+  structuredReview{"Structured review exists?\nPOST /reviews with assignmentId"}
+  completionBlocked["Reject runtime completion\nuntil structured review decision exists"]
+  reviewDecision{"Review decision\nAPPROVED / CHANGES_REQUESTED / REJECTED"}
+  acceptedItem["Item status ACCEPTED\nvia reviewApprovedStatus"]
   revise["NEEDS_REVISION item or bounded follow-up"]
+  rejected["REJECTED/CANCELLED\nor superseded by Lead"]
   fanIn{"Fan-in gate\naccepted parts enough?"}
-  aggregationNeeded{"Goal needs aggregation deliverable?"}
-  aggregationItem["Aggregation/synthesis/delivery item\nDepends on accepted upstream outputs"]
-  aggregator["Aggregator role\nreads accepted upstream files/items"]
-  aggregateOutput["Combined artifact or decision\nsummary, package, release, recommendation"]
-  aggregateReview["Aggregation review\ncoverage, support, caveats, acceptance bar"]
-  aggregateAccepted{"Aggregation accepted?"}
   done["Lead marks Goal DONE\ncompletion summary links support artifacts"]
+  ownerView["Owner sees outputs\nProject shared files and item artifacts\nreports/ or deliverables/ paths"]
   missing["Lead creates missing item\nwork, review, resource, clarification"]
   memory["Shared Memory\nreviewed durable facts, decisions, constraints, risks"]
 
@@ -1181,36 +1257,50 @@ const goalTopologyFlowMermaid = String.raw`flowchart TD
   attentionGate -- no --> detailRead --> topologyGate
   topologyGate --> resourceGate
   resourceGate -- no --> resourceItem --> pollTimer
-  resourceGate -- yes --> directReady
-  directReady -- yes --> done
-  directReady -- no --> plannerNeed
-  plannerNeed -- yes --> plannerItem --> coordinator --> planner --> leadPlan
+  resourceGate -- yes --> currentEnough
+  currentEnough -- yes --> aggregationNeeded
+  currentEnough -- no --> plannerNeed
+  plannerNeed -- yes --> plannerItem --> dependencyGate
   plannerNeed -- no --> leadPlan
-  leadPlan -- "DIRECT gap" --> serialNext --> coordinator
-  leadPlan -- "SERIAL next step" --> serialNext
-  leadPlan -- "PARTS needed" --> createParts --> coordinator
-  coordinator --> workers --> files --> handoff --> review --> accepted
+  dependencyGate -- no --> dependencyBlocked --> projectEvent
+  dependencyGate -- yes --> coordinator --> roleRoute
+  roleRoute -- "PLANNING" --> planner --> topologyProposal --> files --> handoff
+  roleRoute -- "RESEARCH / ANALYSIS / EXECUTION / DRAFT / GENERAL_TASK" --> workers --> files --> handoff
+  roleRoute -- "AGGREGATION / SYNTHESIS / REPORT / DELIVERY / DECISION_PACKAGE" --> aggregator --> aggregateOutput --> files --> handoff
+  handoff --> reviewQueue --> reviewer --> structuredReview
+  structuredReview -- no --> completionBlocked --> reviewer
+  structuredReview -- yes --> reviewDecision
   handoff -. reusable candidates .-> memory
-  review -. approved candidates .-> memory
-  accepted -- no --> revise --> coordinator
-  accepted -- yes --> projectEvent
-  accepted -- yes --> fanIn
+  reviewDecision -. approved candidates .-> memory
+  reviewDecision -- CHANGES_REQUESTED --> revise --> dependencyGate
+  reviewDecision -- REJECTED --> rejected --> projectEvent
+  reviewDecision -- APPROVED --> acceptedItem --> projectEvent
+  acceptedItem -- "planning accepted" --> leadPlan
+  acceptedItem -- "part/work accepted" --> fanIn
+  acceptedItem -- "aggregation accepted" --> done
+  leadPlan -- "DIRECT gap or SERIAL next step" --> createWork --> dependencyGate
+  leadPlan -- "PARTS needed" --> createParts --> dependencyGate
+  leadPlan -- "accepted upstream needs synthesis" --> aggregationItem --> dependencyGate
   fanIn -- "missing part/review/resource" --> missing --> pollTimer
   fanIn -- enough --> aggregationNeeded
   aggregationNeeded -- no --> done
-  aggregationNeeded -- yes --> aggregationItem --> coordinator --> aggregator --> aggregateOutput --> aggregateReview --> aggregateAccepted
-  aggregateAccepted -- no --> revise
-  aggregateAccepted -- yes --> done`;
+  aggregationNeeded -- yes --> aggregationItem
+  done --> ownerView`;
 
 const goalObjectRelationshipMermaid = String.raw`flowchart LR
   project["Project"]
   goal["Goal\nowner outcome"]
-  topology["Goal completion topology\nDIRECT, SERIAL, FAN_OUT_FAN_IN, TOTAL_PARTS_TOTAL"]
+  topology["Goal completion topology\nDIRECT, SERIAL, FAN_OUT_FAN_IN,\nTOTAL_TO_PARTS, TOTAL_PARTS_TOTAL, ITERATIVE_REVIEW"]
   feature["Feature group\noptional lanes, parts, or phases"]
   workItem["WorkItem\nexecutable unit"]
-  dependency["Dependency\nserial edge or aggregation input"]
+  inputPacket["inputPacket\ngoalTopology, workSlice,\nprojectFiles, requiredGlobals"]
+  outputContract["outputContract\nexpected artifacts and acceptance evidence"]
+  dependency["dependsOn[] Dependency\nserial edge or aggregation input"]
+  dependencyGate["Dependency gate\nblocks dispatch and direct claim until completed/accepted"]
   assignment["Assignment\nruntime-bound execution"]
   role["Role\nlead, planner, worker, reviewer, aggregator"]
+  statusFlow["Work item status flow\nREADY, IN_REVIEW, ACCEPTED,\nNEEDS_REVISION, terminal states"]
+  dispatchRule["Template dispatchRules\nstatus/workType -> role"]
   coordinator["Coordinator\nrule and capacity based dispatcher"]
   pollingConfig["Lead polling config\nstrategy, interval, message"]
   pollingState["Lead polling state\nlastRunAt, nextRunAt, lastConversationId"]
@@ -1221,15 +1311,27 @@ const goalObjectRelationshipMermaid = String.raw`flowchart LR
   file["Project shared file\ninputs, evidence, outputs, deliverables"]
   memory["Memory\nreviewed durable knowledge"]
   artifact["Artifact or handoff"]
-  review["Review"]
+  review["Structured Review\n/reviews decision"]
+  reviewGate["Review completion gate\nreview-routed assignments must post review first"]
 
   project --> goal
+  project --> statusFlow
+  statusFlow --> dispatchRule
+  dispatchRule --> role
+  dispatchRule --> coordinator
   goal --> topology
   goal --> feature
   goal --> workItem
   feature --> workItem
+  workItem --> inputPacket
+  inputPacket --> topology
+  inputPacket --> file
+  workItem --> outputContract
+  outputContract --> file
   workItem --> dependency
   dependency --> workItem
+  dependency --> dependencyGate
+  dependencyGate --> coordinator
   workItem --> assignment
   assignment --> role
   coordinator --> assignment
@@ -1249,6 +1351,8 @@ const goalObjectRelationshipMermaid = String.raw`flowchart LR
   workItem --> file
   assignment --> artifact
   artifact --> review
+  review --> reviewGate
+  reviewGate --> statusFlow
   review --> workItem
   review --> memory
   file --> artifact
@@ -1524,6 +1628,7 @@ const eventGraphPreviewToneClasses: Record<string, string> = {
 let docsMermaidRenderQueue = Promise.resolve();
 
 const mermaidChunkReloadKey = 'agentcraft.docs.mermaidChunkReloaded';
+const mermaidViewportPadding = 72;
 
 function isDynamicImportFetchError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
@@ -1552,6 +1657,70 @@ async function loadMermaid() {
       }
     }
     throw error;
+  }
+}
+
+function readMermaidSvgSize(svg: string) {
+  const widthMatch = svg.match(/\bwidth="([\d.]+)(?:px)?"/);
+  const heightMatch = svg.match(/\bheight="([\d.]+)(?:px)?"/);
+  if (widthMatch && heightMatch) {
+    return {
+      width: Number(widthMatch[1]),
+      height: Number(heightMatch[1]),
+    };
+  }
+
+  const viewBoxMatch = svg.match(/\bviewBox="([^"]+)"/);
+  if (viewBoxMatch) {
+    const [, , width, height] = viewBoxMatch[1].trim().split(/\s+/).map(Number);
+    if (Number.isFinite(width) && Number.isFinite(height)) {
+      return { width, height };
+    }
+  }
+
+  return { width: 1200, height: 800 };
+}
+
+function normalizeMermaidSvg(svg: string) {
+  try {
+    const document = new DOMParser().parseFromString(svg, 'image/svg+xml');
+    if (document.querySelector('parsererror')) return svg;
+
+    const svgElement = document.querySelector('svg');
+    if (!svgElement) return svg;
+
+    svgElement.setAttribute('overflow', 'visible');
+    svgElement.setAttribute('style', `${svgElement.getAttribute('style') || ''}; overflow: visible;`);
+
+    const style = document.createElementNS('http://www.w3.org/2000/svg', 'style');
+    style.textContent = `
+      svg,
+      foreignObject,
+      .label,
+      .nodeLabel,
+      .edgeLabel,
+      .cluster-label {
+        overflow: visible;
+      }
+
+      .edgeLabel p,
+      .nodeLabel p {
+        margin: 0;
+        white-space: nowrap;
+      }
+    `;
+    svgElement.insertBefore(style, svgElement.firstChild);
+
+    document
+      .querySelectorAll('foreignObject, .label, .nodeLabel, .edgeLabel, .cluster-label')
+      .forEach((element) => {
+        element.setAttribute('overflow', 'visible');
+        element.setAttribute('style', `${element.getAttribute('style') || ''}; overflow: visible;`);
+      });
+
+    return new XMLSerializer().serializeToString(svgElement);
+  } catch {
+    return svg;
   }
 }
 
@@ -1591,24 +1760,26 @@ function MermaidDiagram({
             lineColor: '#64748b',
             secondaryColor: '#ecfeff',
             tertiaryColor: '#fff7ed',
-            fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif',
+            edgeLabelBackground: '#ffffff',
+            fontFamily: 'ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+            fontSize: '16px',
           },
           flowchart: {
             curve: 'basis',
             htmlLabels: true,
+            nodeSpacing: 58,
+            rankSpacing: 70,
             useMaxWidth: false,
+            wrappingWidth: 180,
           },
         });
         const diagramId = `docs-mermaid-${rawId.replace(/[^a-zA-Z0-9_-]/g, '')}`;
         const result = await mermaid.render(diagramId, chart);
-        const widthMatch = result.svg.match(/\bwidth="([\d.]+)"/);
-        const heightMatch = result.svg.match(/\bheight="([\d.]+)"/);
+        const normalizedSvg = normalizeMermaidSvg(result.svg);
+        const nextSvgSize = readMermaidSvgSize(result.svg);
         if (!cancelled) {
-          setSvg(result.svg);
-          setSvgSize({
-            width: widthMatch ? Number(widthMatch[1]) : 1200,
-            height: heightMatch ? Number(heightMatch[1]) : 800,
-          });
+          setSvg(normalizedSvg);
+          setSvgSize(nextSvgSize);
           setError(null);
         }
       } catch (err) {
@@ -1630,8 +1801,8 @@ function MermaidDiagram({
 
   const scaledSize = svgSize
     ? {
-        width: Math.ceil(svgSize.width * scale),
-        height: Math.ceil(svgSize.height * scale),
+        width: Math.ceil((svgSize.width + mermaidViewportPadding * 2) * scale),
+        height: Math.ceil((svgSize.height + mermaidViewportPadding * 2) * scale),
       }
     : null;
 
@@ -1654,7 +1825,7 @@ function MermaidDiagram({
           resize: 'vertical',
         }}
       >
-        <div className="p-4 [&_.edgeLabel]:rounded [&_.edgeLabel]:bg-white/90 [&_svg]:h-auto [&_svg]:max-w-none">
+        <div className="p-4 [&_.edgeLabel]:rounded [&_.edgeLabel]:bg-white/90 [&_foreignObject]:overflow-visible [&_svg]:h-auto [&_svg]:max-w-none [&_svg]:overflow-visible">
           {error ? (
             <div className="grid gap-3">
               <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm leading-6 text-rose-900">
@@ -1664,17 +1835,25 @@ function MermaidDiagram({
                 <code>{chart}</code>
               </pre>
             </div>
-          ) : svg && scaledSize ? (
+          ) : svg && svgSize && scaledSize ? (
             <div
               style={{
+                position: 'relative',
                 width: scaledSize.width,
                 height: scaledSize.height,
               }}
             >
               <div
                 style={{
+                  boxSizing: 'content-box',
+                  height: svgSize.height,
+                  left: 0,
+                  padding: mermaidViewportPadding,
+                  position: 'absolute',
+                  top: 0,
                   transform: `scale(${scale})`,
                   transformOrigin: 'top left',
+                  width: svgSize.width,
                 }}
                 dangerouslySetInnerHTML={{ __html: svg }}
               />
@@ -1691,26 +1870,29 @@ function MermaidDiagram({
   );
 }
 
-function GoalTopologyWorkflowPreview() {
+function GoalTopologyWorkflowPreview({ language = 'zh' }: { language?: DocsLanguage }) {
+  const copy = goalTopologyDiagramCopy[language];
+
   return (
     <div className="grid gap-4">
       <MermaidDiagram
-        title="Lead Polling / Goal Completion Flow"
-        description="完整控制流：Lead 被定时或事件唤醒，读取 lead.md 和 ledger，做 bounded frontier review，判断 topology，创建最小缺口 item，经 Coordinator 派发、Review、Fan-in，必要时汇总，最后关闭 Goal。"
+        title={copy.flowTitle}
+        description={copy.flowDescription}
         chart={goalTopologyFlowMermaid}
-        scale={0.42}
-        viewportHeight={760}
+        scale={0.48}
+        viewportHeight={800}
       />
       <MermaidDiagram
-        title="Goal / Item / Role Relationship Map"
-        description="对象关系图：Project、Goal、WorkItem、Role、Coordinator、Lead workspace、Resource、File、Review、Memory 之间的持久关系。"
+        title={copy.relationshipTitle}
+        description={copy.relationshipDescription}
         chart={goalObjectRelationshipMermaid}
-        scale={0.5}
+        scale={0.56}
         viewportHeight={620}
       />
       <div className="rounded-md border border-cyan-200 bg-cyan-50 px-4 py-3 text-sm leading-6 text-cyan-950">
-        <strong className="font-semibold">拓扑模式：</strong> {goalTopologyModes.join(' / ')}。
-        Coordinator 只负责调度，Goal 是否完成仍由 Lead polling 根据 accepted items、resource gate、review 和 aggregation gate 判断。
+        <strong className="font-semibold">{copy.modesLabel}</strong> {goalTopologyModes.join(' / ')}
+        {language === 'zh' ? '。' : '.'}{' '}
+        {copy.modesDescription}
       </div>
     </div>
   );
@@ -2019,6 +2201,11 @@ const stringifySearchContent = (value: unknown): string => {
 const docsSearchContentBySection: Record<string, unknown[]> = {
   project: [conceptRows, projectLayerRows],
   'owner-work': [ownerWorkRows],
+  'quick-start': [
+    localPracticeSteps,
+    localPracticeTroubleshootingRows,
+    'Local Agent Pi local-codex agentcraft-local-codex-runner Command Run polling now New Goal Create Goal 互联网捡垃圾',
+  ],
   'module-map': [moduleMapRows],
   'project-status-controls': [projectStatusControlRows],
   'home-actions': [
@@ -2117,11 +2304,19 @@ const englishDocsContentBySection: Partial<Record<string, EnglishDocSectionConte
     ],
   },
   'quick-start': {
-    rows: [
-      ['1. Start with a goal', 'Give AgentCraft the owner-level outcome, not a step-by-step agent script.'],
-      ['2. Choose template', 'A template brings roles, status flow, shared folders, project globals, skills, and runtime defaults.'],
-      ['3. Let roles work', 'Lead creates or refines work items; Coordinator dispatches launchable items; reviewers accept or request revision.'],
+    paragraphs: [
+      'Use this local runbook when you want a real first Project, not only a conceptual tour. It covers the model config, project goal, advanced local agent controls, Lead launch, result surfaces, follow-up goals, and stuck-state checks.',
     ],
+    rows: [
+      ['1. Configure the model', 'Open /agent/config, add an OpenAI-compatible config, set the API URL to your current model endpoint, save the API key, and set the actual model name.'],
+      ['2. Create the Project', 'Open /projects, paste the owner-level goal, keep General Project Template (default), and expand Advanced Options before submitting.'],
+      ['3. Choose Local Agent / Pi', 'Keep Coordinator enabled, set Coordinator launch to Local Agent, set Preferred agent type to Pi, and adjust active-agent, active-goal, coordinator cap, and dispatch-per-tick limits if needed.'],
+      ['4. Start the local runner', 'After creation, open Project Members, select the Lead Agent, open Command, copy the generated runner command, and paste it in the repo root. Do not hand-write project, login, or token arguments.'],
+      ['5. Run Lead polling', 'Click Run polling now on the Lead Agent. A successful run creates or refines READY work items; a failed run should show Runtime error plus details in the runner terminal.'],
+      ['6. Collect results', 'Use Plan for goals, Work Items for execution, Resources for shared files, Delivery for artifacts and reviews, Memory for durable facts, and Event Graph for causality. Add another goal from Home or Plan, then run polling again or enable timed polling.'],
+    ],
+    callout:
+      'If a local agent shows Runtime error, inspect the member detail error and the runner terminal first. Common causes are unavailable model config, invalid key, mismatched model name, or a stopped local runner.',
   },
   'project-loop': {
     rows: [
@@ -2433,6 +2628,7 @@ function EnglishSectionBody({ section }: { section: ArticleSection }) {
       {paragraphs.map((paragraph) => (
         <p key={paragraph}>{paragraph}</p>
       ))}
+      {section.id === 'goal-completion-topologies' && <GoalTopologyWorkflowPreview language="en" />}
       <FieldTable rows={rows} />
       {content?.code && <CodeBlock>{content.code}</CodeBlock>}
       {content?.callout && (
@@ -3007,6 +3203,38 @@ function FieldTable({
   );
 }
 
+function QuickStartStepGallery({
+  steps,
+}: {
+  steps: Array<{
+    title: string;
+    body: string;
+    src: string;
+    alt: string;
+  }>;
+}) {
+  return (
+    <div className="grid gap-4 md:grid-cols-2">
+      {steps.map((step) => (
+        <figure key={step.title} className="overflow-hidden rounded-md border border-slate-200 bg-white">
+          <a href={step.src} target="_blank" rel="noreferrer" className="block bg-slate-50">
+            <img
+              src={step.src}
+              alt={step.alt}
+              loading="lazy"
+              className="aspect-[1280/820] w-full object-cover"
+            />
+          </a>
+          <figcaption className="border-t border-slate-100 px-4 py-3">
+            <h3 className="text-sm font-semibold text-slate-950">{step.title}</h3>
+            <p className="mt-1 text-sm leading-6 text-slate-600">{step.body}</p>
+          </figcaption>
+        </figure>
+      ))}
+    </div>
+  );
+}
+
 export function Docs() {
   const initialSectionId = (() => {
     if (typeof window === 'undefined') return articleSections[0].id;
@@ -3240,22 +3468,22 @@ export function Docs() {
           </Section>
 
           <Section id="quick-start" eyebrow="快速开始" title="创建第一个 Project">
-            <div className="grid gap-3 md:grid-cols-2">
-              {[
-                ['1', '描述目标', '用自然语言写清楚想要的结果、约束、仓库、账号资源和验收标准。'],
-                ['2', '选择项目模版', '默认模版适合通用研发工作；专用模版可以预置角色、共享文件夹、状态流和资源请求。'],
-                ['3', '让 agents 开工', 'Lead 检查 goal frontier 并创建/调整 READY work items；Coordinator 按规则派发，Worker 执行并提交 handoff。'],
-                ['4', '回 Home 处理待办', '当 agent 创建 owner resource request 或 owner confirmation 时，Owner 在 Project Home 补资源、做选择或确认完成。'],
-              ].map(([step, title, body]) => (
-                <div key={step} className="rounded-md border border-slate-200 bg-white p-4">
-                  <div className="mb-3 flex h-7 w-7 items-center justify-center rounded-md bg-slate-950 text-sm font-semibold text-white">
-                    {step}
-                  </div>
-                  <h3 className="font-semibold text-slate-950">{title}</h3>
-                  <p className="mt-2 text-sm leading-6 text-slate-600">{body}</p>
-                </div>
-              ))}
+            <p>
+              下面是一条已经按本地项目跑过的操作路径：先配置大模型，再用通用项目模版创建项目，设置
+              <InlineCode>Local Agent</InlineCode> + <InlineCode>Pi</InlineCode>，启动本机 runner，最后让 Lead
+              polling 把 goal 拆成可执行工作。它适合第一次验证“从一个 goal 到 agent 协作结果”的完整闭环。
+            </p>
+            <div className="rounded-md border border-slate-200 bg-white px-4 py-4 text-sm leading-7 text-slate-700">
+              <strong className="font-semibold text-slate-950">示例 goal：</strong>
+              互联网上有很多现金之类的奖励，解决问题的悬赏，免费参与的抽奖，我想把那些原来人去做很麻烦收益很低的事情，交给 agent 做，但首先头脑风暴，去尽可能地找出这些任务，我称之为互联网捡垃圾。
             </div>
+            <QuickStartStepGallery steps={localPracticeSteps} />
+            <div className="rounded-md border border-cyan-200 bg-cyan-50 px-4 py-4 text-sm leading-7 text-cyan-950">
+              <strong className="font-semibold">runner 命令来源：</strong>
+              本地 runner 命令应从 Project Members 中选中的 Lead Agent 打开 <InlineCode>Command</InlineCode> 面板复制。
+              面板会生成带项目和登录/令牌上下文的命令；复制后在仓库根目录粘贴运行即可，不需要用户手写参数。
+            </div>
+            <FieldTable rows={localPracticeTroubleshootingRows} />
             <div className="flex flex-wrap gap-3 pt-2">
               <Link
                 to="/projects"

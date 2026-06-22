@@ -527,6 +527,9 @@ const AGENT_RUNTIME_STATUS_VARIANT: Record<string, 'default' | 'secondary' | 'su
   ERROR: 'destructive',
 };
 
+const WORK_ITEM_ACCEPTED_STATUSES = new Set(['ACCEPTED', 'DONE', 'COMPLETED']);
+const WORK_ITEM_ACTIVE_STATUSES = new Set(['READY', 'ASSIGNED', 'IN_PROGRESS', 'IN_REVIEW', 'NEEDS_REVISION', 'REJECTED']);
+
 function agentRoleSortRank(role?: string | null) {
   const normalized = String(role || '').toUpperCase();
   const ranks: Record<string, number> = {
@@ -534,7 +537,8 @@ function agentRoleSortRank(role?: string | null) {
     PLANNER_AGENT: 1,
     WORKER_AGENT: 2,
     SECURITY_AUDITOR: 3,
-    INTEGRATOR_AGENT: 4,
+    AGGREGATOR_AGENT: 4,
+    INTEGRATOR_AGENT: 5,
   };
   return ranks[normalized] ?? 9;
 }
@@ -556,6 +560,10 @@ function agentRuntimeIsOffline(runtime?: {
   if (status === 'STOPPED' || status === 'ERROR') return true;
   if (session.dockerStatus?.running === false || session.apiHealth?.ok === false) return true;
   return false;
+}
+
+function agentRuntimeHasAgentRole(runtime: ProjectAgentRuntime) {
+  return runtime.user?.role === 'AI_AGENT' || runtime.role.endsWith('_AGENT');
 }
 
 function agentConversationSortRank(member: ProjectMember, runtime?: ProjectAgentRuntime | null) {
@@ -952,6 +960,16 @@ const ROLE_CONTRACTS: Record<string, RoleContract> = {
       roleLocalSkill('agent-workspace-pm', 'Metric snapshots, risk reports, and reassignment proposal instructions.'),
     ],
   },
+  AGGREGATOR_AGENT: {
+    description: 'Synthesizes accepted upstream work into grounded reports, deliveries, and decision packages.',
+    reads: 'Accepted upstream items and project files',
+    writes: 'Combined shared-file deliverables',
+    trigger: 'Closes fan-in work',
+    skills: [
+      COMMON_WORKSPACE_SKILL,
+      roleLocalSkill('agent-workspace-aggregator', 'Grounded fan-in synthesis, source caveats, and deliverable packaging.'),
+    ],
+  },
   INTEGRATOR_AGENT: {
     description: 'Connects accepted work to external systems such as GitHub, CI, releases, deployments, or merge workflows.',
     reads: 'Accepted work and external links',
@@ -1124,6 +1142,7 @@ const PROJECT_MEMBER_ROLE_OPTIONS = [
   { value: 'REVIEW_AGENT', label: 'Review Agent' },
   { value: 'SECURITY_AUDITOR', label: 'Security Auditor' },
   { value: 'PM_AGENT', label: 'PM Agent' },
+  { value: 'AGGREGATOR_AGENT', label: 'Aggregator Agent' },
   { value: 'INTEGRATOR_AGENT', label: 'Integrator Agent' },
   { value: 'STAKEHOLDER', label: 'Stakeholder' },
   { value: 'CONTRIBUTOR', label: 'Contributor' },
@@ -1146,6 +1165,7 @@ const PROJECT_ROLE_ICON: Record<string, typeof Bot> = {
   REVIEW_AGENT: ClipboardCheck,
   SECURITY_AUDITOR: ShieldCheck,
   PM_AGENT: CalendarDays,
+  AGGREGATOR_AGENT: Layers3,
   INTEGRATOR_AGENT: Workflow,
   FINDING_VALIDATOR: FileSearch,
   REPORT_REVIEWER: ClipboardCheck,
@@ -1583,6 +1603,7 @@ function displayLaunchTarget(launchMode?: AgentLaunchMode | string | null, agent
 type ProjectSectionKey = 'home' | 'events' | 'members' | 'planning' | 'work' | 'knowledge' | 'documents' | 'delivery' | 'settings';
 type AgentRuntimePanelKey = 'workspace' | 'skills' | 'scope' | 'runner' | 'polling' | 'prompt' | null;
 type WorkItemsView = 'list' | 'new' | 'detail';
+type WorkItemDetailTab = 'details' | 'activity' | 'discussion' | 'execution';
 
 const PROJECT_SECTIONS: Array<{
   key: ProjectSectionKey;
@@ -1629,6 +1650,73 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }
 
+function collectProjectFilePathsFromValue(value: unknown, paths: Set<string>) {
+  if (!value) return;
+  if (typeof value === 'string') {
+    const path = normalizeProjectFileFolderPath(value);
+    if (path && path.includes('/')) paths.add(path);
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((entry) => collectProjectFilePathsFromValue(entry, paths));
+    return;
+  }
+  if (!isRecord(value)) return;
+  const directPath = typeof value.path === 'string' ? normalizeProjectFileFolderPath(value.path) : '';
+  if (directPath && directPath.includes('/')) paths.add(directPath);
+  [
+    value.sharedFiles,
+    value.outputProjectFiles,
+    value.outputPaths,
+    value.projectFiles,
+    value.files,
+    value.deliverables,
+    value.artifacts,
+  ].forEach((entry) => collectProjectFilePathsFromValue(entry, paths));
+}
+
+function workItemOutputProjectFilePaths(item?: ProjectWorkItem | null) {
+  const paths = new Set<string>();
+  if (!item) return [];
+  collectProjectFilePathsFromValue((item as any).outputProjectFiles, paths);
+  collectProjectFilePathsFromValue(item.outputContract, paths);
+  const inputPacket = isRecord(item.inputPacket) ? item.inputPacket : {};
+  collectProjectFilePathsFromValue(inputPacket.outputProjectFiles, paths);
+  collectProjectFilePathsFromValue(inputPacket.outputPaths, paths);
+  return [...paths];
+}
+
+function recordTextValue(value: unknown, keys: string[]) {
+  if (!isRecord(value)) return '';
+  for (const key of keys) {
+    const entry = value[key];
+    if (typeof entry === 'string' && entry.trim()) return entry.trim();
+  }
+  return '';
+}
+
+function workItemOutputContractText(item?: ProjectWorkItem | null) {
+  const outputContract = (item as any)?.outputContract;
+  if (!outputContract) return '';
+  if (typeof outputContract === 'string') return outputContract.trim();
+  const directText = recordTextValue(outputContract, [
+    'conclusion',
+    'summary',
+    'result',
+    'expectedArtifact',
+    'expectedOutput',
+    'deliverable',
+    'handoff',
+    'description',
+  ]);
+  if (directText) return directText;
+  try {
+    return JSON.stringify(outputContract, null, 2);
+  } catch {
+    return '';
+  }
+}
+
 function eventPayloadString(payload: Record<string, unknown> | null | undefined, key: string) {
   const value = payload?.[key];
   return typeof value === 'string' && value.trim() ? value.trim() : '';
@@ -1637,6 +1725,12 @@ function eventPayloadString(payload: Record<string, unknown> | null | undefined,
 function eventPayloadStringArray(payload: Record<string, unknown> | null | undefined, key: string) {
   const value = payload?.[key];
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0) : [];
+}
+
+function eventPayloadNumber(payload: Record<string, unknown> | null | undefined, key: string) {
+  const value = payload?.[key];
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function projectEventMatchesWorkItem(event: ProjectEventItem, workItemId: string) {
@@ -1662,6 +1756,21 @@ function projectEventFilePath(event: ProjectEventItem) {
     eventPayloadString(payload, 'folderPath') ||
     (event.refType === 'PROJECT_FILE' || event.refType === 'PROJECT_FOLDER' ? event.refId || '' : '')
   );
+}
+
+function projectFileEntryFromEvent(event: ProjectEventItem): ProjectFileEntry | null {
+  const payload = event.payload || {};
+  const path = projectEventFilePath(event);
+  if (!path) return null;
+  return {
+    path,
+    key: eventPayloadString(payload, 'key') || path,
+    size: eventPayloadNumber(payload, 'size'),
+    lastModified: event.createdAt,
+    contentType: eventPayloadString(payload, 'contentType') || undefined,
+    source: event.type,
+    type: event.type === 'PROJECT_FOLDER_CREATED' ? 'folder' : 'file',
+  };
 }
 
 function humanizeEventType(type?: string) {
@@ -2184,6 +2293,8 @@ export function ProjectDetail() {
   const isReadOnly = !token;
   const [project, setProject] = useState<any>(null);
   const [workItems, setWorkItems] = useState<ProjectWorkItem[]>([]);
+  const [homeWorkItems, setHomeWorkItems] = useState<ProjectWorkItem[]>([]);
+  const [homeWorkItemListMeta, setHomeWorkItemListMeta] = useState<ProjectWorkItemListMeta | null>(null);
   const [memories, setMemories] = useState<any[]>([]);
   const [artifacts, setArtifacts] = useState<any[]>([]);
   const [reviews, setReviews] = useState<any[]>([]);
@@ -2201,7 +2312,9 @@ export function ProjectDetail() {
   const [selectedProjectFile, setSelectedProjectFile] = useState<ProjectFileEntry | null>(null);
   const [projectFilePreviewUrl, setProjectFilePreviewUrl] = useState('');
   const [projectFilePreviewText, setProjectFilePreviewText] = useState('');
+  const [projectFilePreviewError, setProjectFilePreviewError] = useState('');
   const [loadingProjectFilePreview, setLoadingProjectFilePreview] = useState(false);
+  const [workItemProjectFilePreview, setWorkItemProjectFilePreview] = useState<ProjectFileEntry | null>(null);
   const [activityItems, setActivityItems] = useState<ProjectActivityItem[]>([]);
   const [projectEventGraph, setProjectEventGraph] = useState<ProjectEventGraph | null>(null);
   const [selectedEventGraphNodeId, setSelectedEventGraphNodeId] = useState('');
@@ -2238,7 +2351,8 @@ export function ProjectDetail() {
   const [projectFileMentionResults, setProjectFileMentionResults] = useState<ProjectFileMentionEntry[]>([]);
   const [projectFileMentionActiveIndex, setProjectFileMentionActiveIndex] = useState(0);
   const [loadingProjectFileMentions, setLoadingProjectFileMentions] = useState(false);
-  const [expandedHomeGoalIds, setExpandedHomeGoalIds] = useState<Record<string, boolean>>({});
+  const [expandedHomeGoalItemIds, setExpandedHomeGoalItemIds] = useState<Record<string, boolean>>({});
+  const [expandedHomeGoalOutputIds, setExpandedHomeGoalOutputIds] = useState<Record<string, boolean>>({});
   const [expandedHomeFeatureIds, setExpandedHomeFeatureIds] = useState<Record<string, boolean>>({});
   const [goalForm, setGoalForm] = useState({
     title: '',
@@ -2278,6 +2392,7 @@ export function ProjectDetail() {
   });
   const [savingWorkItem, setSavingWorkItem] = useState(false);
   const [savingGoal, setSavingGoal] = useState(false);
+  const [deletingGoalId, setDeletingGoalId] = useState('');
   const [savingFeature, setSavingFeature] = useState(false);
   const [savingArtifact, setSavingArtifact] = useState(false);
   const [savingReview, setSavingReview] = useState(false);
@@ -2456,13 +2571,14 @@ export function ProjectDetail() {
   const [activeProjectSection, setActiveProjectSection] = useState<ProjectSectionKey>('home');
   const [expandedRoleInfo, setExpandedRoleInfo] = useState('');
   const [workStatusFilter, setWorkStatusFilter] = useState('ALL');
+  const [workGoalFilter, setWorkGoalFilter] = useState('ALL');
   const [workItemSearch, setWorkItemSearch] = useState('');
-  const [showClosedWorkItems, setShowClosedWorkItems] = useState(false);
   const [workItemPage, setWorkItemPage] = useState(1);
   const [workItemPageSize, setWorkItemPageSize] = useState(DEFAULT_WORK_ITEM_PAGE_SIZE);
   const [workItemListMeta, setWorkItemListMeta] = useState<ProjectWorkItemListMeta | null>(null);
   const [loadingWorkItems, setLoadingWorkItems] = useState(false);
   const [workItemsView, setWorkItemsView] = useState<WorkItemsView>('list');
+  const [workItemDetailTab, setWorkItemDetailTab] = useState<WorkItemDetailTab>('details');
   const canManageProject = !!user && !!project && (user.id === project.ownerId || user.id === project.leadAgentUserId);
   const canDeleteProject = !!user && !!project && user.id === project.ownerId;
   const canEditProjectGlobals = !!user && !!project && user.id === project.ownerId;
@@ -2474,11 +2590,9 @@ export function ProjectDetail() {
   const workItemListQueryParams = (page = workItemPage, limit = workItemPageSize) => ({
     page: String(page),
     limit: String(limit),
-    includeClosed:
-      showClosedWorkItems || CLOSED_WORK_ITEM_STATUSES.includes(workStatusFilter)
-        ? 'true'
-        : 'false',
+    includeClosed: 'true',
     ...(workStatusFilter !== 'ALL' ? { status: workStatusFilter } : {}),
+    ...(workGoalFilter !== 'ALL' ? { goalId: workGoalFilter } : {}),
     ...(workItemSearch.trim() ? { search: workItemSearch.trim() } : {}),
   });
 
@@ -2508,6 +2622,7 @@ export function ProjectDetail() {
       const [
         projectDetail,
         workItemsRes,
+        homeWorkItemsRes,
         memoryList,
         artifactList,
         reviewList,
@@ -2525,6 +2640,7 @@ export function ProjectDetail() {
       ] = await Promise.all([
         api.projects.get(id),
         api.projects.workItems.list(id, workItemListQueryParams()),
+        api.projects.workItems.list(id, { page: '1', limit: '200', includeClosed: 'true' }),
         api.projects.memories.list(id, { limit: '50' }),
         api.projects.artifacts.list(id, { limit: '50' }),
         api.projects.reviews.list(id, { limit: '50' }),
@@ -2550,6 +2666,8 @@ export function ProjectDetail() {
       setProject(projectDetail);
       setWorkItems(workItemsRes.data);
       setWorkItemListMeta(workItemsRes.meta || null);
+      setHomeWorkItems(homeWorkItemsRes.data || []);
+      setHomeWorkItemListMeta(homeWorkItemsRes.meta || null);
       setMemories(memoryList);
       setArtifacts(artifactList);
       setReviews(reviewList);
@@ -2580,12 +2698,12 @@ export function ProjectDetail() {
 
   useEffect(() => {
     setWorkItemPage(1);
-  }, [workStatusFilter, workItemSearch, workItemPageSize, showClosedWorkItems]);
+  }, [workStatusFilter, workGoalFilter, workItemSearch, workItemPageSize]);
 
   useEffect(() => {
     if (!id) return;
     void loadWorkItemsPage();
-  }, [id, workItemPage, workItemPageSize, workStatusFilter, workItemSearch, showClosedWorkItems]);
+  }, [id, workItemPage, workItemPageSize, workStatusFilter, workGoalFilter, workItemSearch]);
 
   const handleRunProjectCoordinator = async () => {
     if (!id || runningCoordinator) return;
@@ -2766,8 +2884,13 @@ export function ProjectDetail() {
   const filteredWorkItems = useMemo(() => {
     if (workItemListMeta) return workItems;
     const normalizedSearch = workItemSearch.trim().toLowerCase();
+    const features = (project?.features || []) as ProjectFeatureOption[];
     return workItems.filter((item) => {
       if (workStatusFilter !== 'ALL' && item.status !== workStatusFilter) return false;
+      if (workGoalFilter !== 'ALL') {
+        const itemGoalId = item.goalId || (item.featureId ? features.find((feature) => feature.id === item.featureId)?.goalId : undefined);
+        if (itemGoalId !== workGoalFilter) return false;
+      }
       if (!normalizedSearch) return true;
       return [
         item.title,
@@ -2779,28 +2902,64 @@ export function ProjectDetail() {
         .filter(Boolean)
         .some((value) => String(value).toLowerCase().includes(normalizedSearch));
     });
-  }, [workItemListMeta, workItemSearch, workItems, workStatusFilter]);
+  }, [project?.features, workGoalFilter, workItemListMeta, workItemSearch, workItems, workStatusFilter]);
 
   const workStatusCounts = useMemo(() => {
-    if (workItemListMeta?.statusCounts) {
-      return {
-        ...(boardSnapshot?.metrics.workItemStatusCounts || {}),
-        ...workItemListMeta.statusCounts,
-      };
+    if (workItemListMeta?.statusCounts) return workItemListMeta.statusCounts;
+    if (boardSnapshot?.metrics.workItemStatusCounts && workGoalFilter === 'ALL' && !workItemSearch.trim()) {
+      return boardSnapshot.metrics.workItemStatusCounts;
     }
-    if (boardSnapshot?.metrics.workItemStatusCounts) return boardSnapshot.metrics.workItemStatusCounts;
-    return workItems.reduce<Record<string, number>>(
-      (counts, item) => ({
-        ...counts,
-        [item.status]: (counts[item.status] || 0) + 1,
-      }),
-      {},
-    );
-  }, [boardSnapshot?.metrics.workItemStatusCounts, workItemListMeta?.statusCounts, workItems]);
+    const normalizedSearch = workItemSearch.trim().toLowerCase();
+    const features = (project?.features || []) as ProjectFeatureOption[];
+    return workItems.reduce<Record<string, number>>((counts, item) => {
+      if (workGoalFilter !== 'ALL') {
+        const itemGoalId = item.goalId || (item.featureId ? features.find((feature) => feature.id === item.featureId)?.goalId : undefined);
+        if (itemGoalId !== workGoalFilter) return counts;
+      }
+      if (normalizedSearch) {
+        const matchesSearch = [
+          item.title,
+          item.description,
+          item.scopeBrief,
+          item.acceptanceCriteria,
+          item.workType,
+          typeof item.outputContract === 'string' ? item.outputContract : JSON.stringify(item.outputContract || ''),
+        ]
+          .filter(Boolean)
+          .some((value) => String(value).toLowerCase().includes(normalizedSearch));
+        if (!matchesSearch) return counts;
+      }
+      counts[item.status] = (counts[item.status] || 0) + 1;
+      return counts;
+    }, {});
+  }, [boardSnapshot?.metrics.workItemStatusCounts, project?.features, workGoalFilter, workItemListMeta?.statusCounts, workItemSearch, workItems]);
+  const workStatusFilterOptions = useMemo(() => {
+    const statuses = new Set([...WORK_ITEM_STATUS_OPTIONS, ...Object.keys(workStatusCounts || {})]);
+    return [...statuses].sort((left, right) => {
+      const leftIndex = WORK_ITEM_STATUS_OPTIONS.indexOf(left);
+      const rightIndex = WORK_ITEM_STATUS_OPTIONS.indexOf(right);
+      if (leftIndex !== -1 || rightIndex !== -1) {
+        return (leftIndex === -1 ? 99 : leftIndex) - (rightIndex === -1 ? 99 : rightIndex);
+      }
+      return left.localeCompare(right);
+    });
+  }, [workStatusCounts]);
 
   const projectWorkItemTotal = useMemo(
     () => workItemListMeta?.total ?? boardSnapshot?.metrics.workItems ?? project?.workItemCount ?? workItems.length,
     [boardSnapshot?.metrics.workItems, project?.workItemCount, workItemListMeta?.total, workItems.length],
+  );
+  const workStatusAllCount = useMemo(() => {
+    const countedTotal = Object.values(workStatusCounts || {}).reduce((sum, count) => sum + (Number(count) || 0), 0);
+    return countedTotal || projectWorkItemTotal;
+  }, [projectWorkItemTotal, workStatusCounts]);
+  const homeWorkItemsForUi = useMemo(
+    () => (homeWorkItemListMeta || homeWorkItems.length ? homeWorkItems : workItems),
+    [homeWorkItemListMeta, homeWorkItems, workItems],
+  );
+  const projectAllWorkItemTotal = useMemo(
+    () => homeWorkItemListMeta?.total ?? homeWorkItemsForUi.length,
+    [homeWorkItemListMeta?.total, homeWorkItemsForUi.length],
   );
   const workItemTotalPages = Math.max(1, workItemListMeta?.totalPages || Math.ceil(projectWorkItemTotal / workItemPageSize) || 1);
   const workItemPageStart = projectWorkItemTotal > 0 ? (workItemPage - 1) * workItemPageSize + 1 : 0;
@@ -2867,8 +3026,8 @@ export function ProjectDetail() {
     return [...byMemberId.values()];
   }, [agentRuntimes, id, project?.members]);
   const activeAgentCount = useMemo(
-    () => activeMembers.filter((member) => member.user.role === 'AI_AGENT' || member.role.endsWith('_AGENT')).length,
-    [activeMembers],
+    () => agentRuntimes.filter((runtime) => agentRuntimeHasAgentRole(runtime) && !agentRuntimeIsOffline(runtime)).length,
+    [agentRuntimes],
   );
   const activeGoalCount = useMemo(
     () =>
@@ -2881,6 +3040,9 @@ export function ProjectDetail() {
   const maxActiveGoals = projectSettingsForm.maxActiveGoals || String(DEFAULT_PROJECT_MAX_ACTIVE_GOALS);
   const maxActiveAgentsNumber = Number(maxActiveAgents) || DEFAULT_PROJECT_MAX_ACTIVE_AGENTS;
   const maxActiveGoalsNumber = Number(maxActiveGoals) || DEFAULT_PROJECT_MAX_ACTIVE_GOALS;
+  const activeAgentCapacityReached = activeAgentCount >= maxActiveAgentsNumber;
+  const activeAgentCapacityMessage =
+    `Project active agent limit reached (${activeAgentCount}/${maxActiveAgents}). Stop or dismiss a running agent, or increase Max Active Agents before launching another runtime.`;
 
   useEffect(() => {
     setSelectedEventGraphNodeId('');
@@ -3663,6 +3825,71 @@ export function ProjectDetail() {
     ? featureById.get(selectedWorkItemForDetail.featureId)?.title || 'Linked feature'
     : 'No feature';
 
+  const projectFileByPath = useMemo(() => {
+    return new Map(allProjectFiles.map((file) => [normalizeProjectFileFolderPath(file.path), file]));
+  }, [allProjectFiles]);
+
+  const homeOutputFiles = useMemo(() => {
+    const byPath = new Map<string, ProjectFileEntry>();
+    homeWorkItemsForUi.forEach((item) => {
+      workItemOutputProjectFilePaths(item).forEach((path) => {
+        const normalizedPath = normalizeProjectFileFolderPath(path);
+        if (!normalizedPath || byPath.has(normalizedPath)) return;
+        byPath.set(normalizedPath, projectFileByPath.get(normalizedPath) || {
+          path: normalizedPath,
+          key: normalizedPath,
+          size: 0,
+          type: 'file',
+        });
+      });
+    });
+    return [...byPath.values()].sort(
+      (left, right) =>
+        new Date(right.lastModified || 0).getTime() - new Date(left.lastModified || 0).getTime() ||
+        left.path.localeCompare(right.path),
+    );
+  }, [homeWorkItemsForUi, projectFileByPath]);
+
+  const homeGoalSummaries = useMemo(() => {
+    const goals = ((project?.goals || []) as ProjectGoalOption[]);
+    return goals.map((goal) => {
+      const items = homeWorkItemsForUi.filter((item) => resolveWorkItemGoalId(item) === goal.id);
+      const statusCounts = items.reduce<Record<string, number>>((counts, item) => {
+        counts[item.status] = (counts[item.status] || 0) + 1;
+        return counts;
+      }, {});
+      const acceptedCount = items.filter((item) => WORK_ITEM_ACCEPTED_STATUSES.has(item.status)).length;
+      const activeCount = items.filter((item) => WORK_ITEM_ACTIVE_STATUSES.has(item.status)).length;
+      const outputFilesByPath = new Map<string, ProjectFileEntry>();
+      items.forEach((item) => {
+        workItemOutputProjectFilePaths(item).forEach((path) => {
+          const normalizedPath = normalizeProjectFileFolderPath(path);
+          if (!normalizedPath || outputFilesByPath.has(normalizedPath)) return;
+          outputFilesByPath.set(normalizedPath, projectFileByPath.get(normalizedPath) || {
+            path: normalizedPath,
+            key: normalizedPath,
+            size: 0,
+            type: 'file',
+          });
+        });
+      });
+      const outputFiles = [...outputFilesByPath.values()].sort(
+        (left, right) =>
+          new Date(right.lastModified || 0).getTime() - new Date(left.lastModified || 0).getTime() ||
+          left.path.localeCompare(right.path),
+      );
+      return {
+        goal,
+        items,
+        statusCounts,
+        acceptedCount,
+        activeCount,
+        outputFiles,
+        progress: items.length ? Math.round((acceptedCount / items.length) * 100) : 0,
+      };
+    });
+  }, [homeWorkItemsForUi, project?.goals, projectFileByPath]);
+
   const selectedRelatedWorkItems = useMemo(() => {
     const item = selectedWorkItemForDetail as any;
     if (!item) return [];
@@ -3728,22 +3955,124 @@ export function ProjectDetail() {
     );
   }, [reviews, selectedWorkItemForDetail?.id, selectedWorkItemForDetail?.reviews]);
 
+  const selectedWorkItemArtifacts = useMemo(() => {
+    const workItemId = selectedWorkItemForDetail?.id;
+    if (!workItemId) return [];
+    const detailArtifacts = selectedWorkItemForDetail?.artifacts || [];
+    const seen = new Set(detailArtifacts.map((artifact: any) => artifact.id).filter(Boolean));
+    return [
+      ...detailArtifacts,
+      ...artifacts.filter((artifact: any) => artifact.workItemId === workItemId && !seen.has(artifact.id)),
+    ].sort(
+      (a: any, b: any) =>
+        new Date(b.createdAt || b.updatedAt || 0).getTime() -
+        new Date(a.createdAt || a.updatedAt || 0).getTime(),
+    );
+  }, [artifacts, selectedWorkItemForDetail?.artifacts, selectedWorkItemForDetail?.id]);
+
+  const selectedWorkItemRunResults = useMemo(
+    () =>
+      [...(selectedWorkItemForDetail?.runs || [])]
+        .filter((run: any) => typeof run.resultSummary === 'string' && run.resultSummary.trim())
+        .sort(
+          (a: any, b: any) =>
+            new Date(b.finishedAt || b.updatedAt || b.createdAt || 0).getTime() -
+            new Date(a.finishedAt || a.updatedAt || a.createdAt || 0).getTime(),
+        ),
+    [selectedWorkItemForDetail?.runs],
+  );
+
+  const selectedWorkItemConclusion = useMemo(() => {
+    const approvedReview = selectedWorkItemReviews.find(
+      (review: any) => review.status === 'APPROVED' && typeof review.reviewNote === 'string' && review.reviewNote.trim(),
+    );
+    if (approvedReview) return { label: 'Approved conclusion', text: approvedReview.reviewNote.trim() };
+
+    const latestReview = selectedWorkItemReviews.find(
+      (review: any) => typeof review.reviewNote === 'string' && review.reviewNote.trim(),
+    );
+    if (latestReview) return { label: `${latestReview.status || 'Review'} note`, text: latestReview.reviewNote.trim() };
+
+    const latestRunResult = selectedWorkItemRunResults[0];
+    if (latestRunResult) return { label: 'Run result', text: latestRunResult.resultSummary.trim() };
+
+    const handoffArtifact = selectedWorkItemArtifacts.find(
+      (artifact: any) => typeof artifact.content === 'string' && artifact.content.trim(),
+    );
+    if (handoffArtifact) return { label: handoffArtifact.artifactType || 'Artifact note', text: handoffArtifact.content.trim() };
+
+    const outputContractText = workItemOutputContractText(selectedWorkItemForDetail);
+    if (outputContractText) return { label: 'Expected output', text: outputContractText };
+
+    if (WORK_ITEM_ACCEPTED_STATUSES.has(selectedWorkItemForDetail?.status || '')) {
+      return { label: 'Conclusion', text: 'This item is accepted, but no written conclusion has been recorded yet.' };
+    }
+    return { label: 'Conclusion', text: 'No conclusion has been recorded yet.' };
+  }, [selectedWorkItemArtifacts, selectedWorkItemForDetail, selectedWorkItemReviews, selectedWorkItemRunResults]);
+
   const selectedWorkItemFileEvents = useMemo(
     () =>
       selectedWorkItemEvents
         .filter((event) => PROJECT_FILE_EVENT_TYPES.includes(event.type) && projectEventFilePath(event))
-        .map((event) => ({
-          id: event.id,
-          type: event.type,
-          title: humanizeEventType(event.type),
-          path: projectEventFilePath(event),
-          actor: formatProjectEventActor(event),
-          createdAt: event.createdAt,
-          seq: event.seq,
-        }))
+        .map((event) => {
+          const file = projectFileEntryFromEvent(event);
+          return {
+            id: event.id,
+            type: event.type,
+            title: humanizeEventType(event.type),
+            path: file?.path || projectEventFilePath(event),
+            file,
+            actor: formatProjectEventActor(event),
+            createdAt: event.createdAt,
+            seq: event.seq,
+          };
+        })
         .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()),
     [selectedWorkItemEvents],
   );
+
+  const selectedWorkItemOutputFiles = useMemo(() => {
+    const byPath = new Map<string, ProjectFileEntry>();
+    const addFile = (file?: ProjectFileEntry | null) => {
+      const normalizedPath = normalizeProjectFileFolderPath(file?.path);
+      if (!normalizedPath || byPath.has(normalizedPath)) return;
+      const indexed = projectFileByPath.get(normalizedPath);
+      byPath.set(normalizedPath, {
+        ...(file || { path: normalizedPath, key: normalizedPath, size: 0 }),
+        ...(indexed || {}),
+        path: indexed?.path || normalizedPath,
+        key: indexed?.key || file?.key || normalizedPath,
+        size: indexed?.size ?? file?.size ?? 0,
+        type: indexed?.type || file?.type || 'file',
+      });
+    };
+
+    workItemOutputProjectFilePaths(selectedWorkItemForDetail).forEach((path) => {
+      const normalizedPath = normalizeProjectFileFolderPath(path);
+      addFile(projectFileByPath.get(normalizedPath) || {
+        path: normalizedPath,
+        key: normalizedPath,
+        size: 0,
+        type: 'file',
+      });
+    });
+    selectedWorkItemFileEvents.forEach((event) => addFile(event.file || {
+      path: event.path,
+      key: event.path,
+      size: 0,
+      lastModified: event.createdAt,
+      type: 'file',
+    }));
+    selectedWorkItemArtifacts.forEach((artifact: any) => {
+      artifactResources(artifact).forEach(addFile);
+    });
+
+    return [...byPath.values()].sort(
+      (left, right) =>
+        new Date(right.lastModified || 0).getTime() - new Date(left.lastModified || 0).getTime() ||
+        left.path.localeCompare(right.path),
+    );
+  }, [projectFileByPath, selectedWorkItemArtifacts, selectedWorkItemFileEvents, selectedWorkItemForDetail]);
 
   const selectedWorkItemMemoryHistory = useMemo(() => {
     if (!selectedWorkItemId) return [];
@@ -3792,15 +4121,15 @@ export function ProjectDetail() {
   const totalAssignments = useMemo(
     () =>
       boardSnapshot?.metrics.assignments ??
-      workItems.reduce((sum, item) => sum + (item._count?.assignments ?? item.assignments?.length ?? 0), 0),
-    [boardSnapshot?.metrics.assignments, workItems],
+      homeWorkItemsForUi.reduce((sum, item) => sum + (item._count?.assignments ?? item.assignments?.length ?? 0), 0),
+    [boardSnapshot?.metrics.assignments, homeWorkItemsForUi],
   );
 
   const totalRuns = useMemo(
     () =>
       boardSnapshot?.metrics.runs ??
-      workItems.reduce((sum, item) => sum + (item._count?.runs ?? item.runs?.length ?? 0), 0),
-    [boardSnapshot?.metrics.runs, workItems],
+      homeWorkItemsForUi.reduce((sum, item) => sum + (item._count?.runs ?? item.runs?.length ?? 0), 0),
+    [boardSnapshot?.metrics.runs, homeWorkItemsForUi],
   );
 
   const homeHealthStats = useMemo(
@@ -3818,9 +4147,9 @@ export function ProjectDetail() {
         icon: Rocket,
       },
       {
-        label: 'Artifacts',
-        value: boardSnapshot?.metrics.artifacts ?? artifacts.length,
-        detail: `${handoffArtifacts.length} handoffs`,
+        label: 'Outputs',
+        value: homeOutputFiles.length,
+        detail: `${artifacts.length} artifacts`,
         icon: FileText,
       },
       {
@@ -3833,10 +4162,10 @@ export function ProjectDetail() {
     [
       activeAssignments.length,
       artifacts.length,
-      boardSnapshot?.metrics.artifacts,
       boardSnapshot?.metrics.reviews,
       boardSnapshot?.metrics.runStatusCounts.RUNNING,
       handoffArtifacts.length,
+      homeOutputFiles.length,
       openReviews.length,
       reviews.length,
       totalAssignments,
@@ -3846,11 +4175,23 @@ export function ProjectDetail() {
 
   const homeDeliveryLanes = useMemo(() => {
     if (boardSnapshot?.lanes?.length) {
-      return boardSnapshot.lanes.filter((lane: any) => !CLOSED_WORK_ITEM_STATUSES.includes(lane.status));
+      const lanesByStatus = new Map(boardSnapshot.lanes.map((lane: any) => [lane.status, lane]));
+      homeWorkItemsForUi.forEach((item) => {
+        if (lanesByStatus.has(item.status)) return;
+        lanesByStatus.set(item.status, { status: item.status, count: 0, items: [] });
+      });
+      return [...lanesByStatus.values()].map((lane: any) => {
+        const items = homeWorkItemsForUi.filter((item) => item.status === lane.status);
+        return {
+          ...lane,
+          count: items.length || lane.count || 0,
+          items: items.length ? items.slice(0, 4) : lane.items || [],
+        };
+      });
     }
     const groups = new Map<string, ProjectWorkItem[]>();
-    WORK_ITEM_STATUS_OPTIONS.filter((status) => !CLOSED_WORK_ITEM_STATUSES.includes(status)).forEach((status) => groups.set(status, []));
-    workItems.forEach((item) => {
+    WORK_ITEM_STATUS_OPTIONS.forEach((status) => groups.set(status, []));
+    homeWorkItemsForUi.forEach((item) => {
       const bucket = groups.get(item.status) || [];
       bucket.push(item);
       groups.set(item.status, bucket);
@@ -3860,7 +4201,7 @@ export function ProjectDetail() {
       count: items.length,
       items: [...items].sort((a, b) => (b.priority || 0) - (a.priority || 0)).slice(0, 4),
     }));
-  }, [boardSnapshot?.lanes, workItems]);
+  }, [boardSnapshot?.lanes, homeWorkItemsForUi]);
 
   const homeRecentRuns = useMemo(() => {
     if (boardSnapshot?.recent.runs?.length) return boardSnapshot.recent.runs.slice(0, 4);
@@ -3903,6 +4244,10 @@ export function ProjectDetail() {
   const runtimeByMemberId = useMemo(() => {
     return new Map(agentRuntimes.map((runtime) => [runtime.memberId, runtime]));
   }, [agentRuntimes]);
+  const launchWouldAddActiveAgent = useCallback((memberId?: string) => {
+    const runtime = memberId ? runtimeByMemberId.get(memberId) : null;
+    return !runtime || agentRuntimeIsOffline(runtime);
+  }, [runtimeByMemberId]);
 
   const assignmentRuntimeStatesByMemberId = useMemo(() => {
     const map = new Map<string, ProjectAssignmentRuntimeState[]>();
@@ -5307,20 +5652,11 @@ export function ProjectDetail() {
     }
   };
 
-  const handleSelectProjectFile = async (file: ProjectFileEntry) => {
+  const loadProjectFilePreview = async (file: ProjectFileEntry) => {
     if (!id) return;
     setProjectFilePreviewUrl('');
     setProjectFilePreviewText('');
-    setError('');
-    if (file.type === 'folder') {
-      const nextPrefix = normalizeProjectFileFolderPath(file.path);
-      setProjectFilePrefix(nextPrefix);
-      setSelectedProjectFile(null);
-      setLoadingProjectFilePreview(false);
-      await loadProjectFiles(projectFileSearch, nextPrefix);
-      return;
-    }
-    setSelectedProjectFile(file);
+    setProjectFilePreviewError('');
     setLoadingProjectFilePreview(true);
     try {
       const kind = projectFilePreviewKind(file);
@@ -5332,10 +5668,46 @@ export function ProjectDetail() {
         setProjectFilePreviewUrl(result.url);
       }
     } catch (err: any) {
-      setError(err.message || 'Failed to preview project file');
+      const message = err.message || 'Failed to preview project file';
+      setProjectFilePreviewError(message);
+      setError(message);
     } finally {
       setLoadingProjectFilePreview(false);
     }
+  };
+
+  const handleSelectProjectFile = async (file: ProjectFileEntry) => {
+    if (!id) return;
+    setProjectFilePreviewError('');
+    setError('');
+    if (file.type === 'folder') {
+      const nextPrefix = normalizeProjectFileFolderPath(file.path);
+      setProjectFilePrefix(nextPrefix);
+      setSelectedProjectFile(null);
+      setLoadingProjectFilePreview(false);
+      await loadProjectFiles(projectFileSearch, nextPrefix);
+      return;
+    }
+    setSelectedProjectFile(file);
+    await loadProjectFilePreview(file);
+  };
+
+  const handleOpenWorkItemProjectFilePreview = async (file: ProjectFileEntry) => {
+    if (!id || !canAccessProjectFiles || file.type === 'folder') return;
+    const normalizedPath = normalizeProjectFileFolderPath(file.path);
+    const indexedFile = allProjectFiles.find((entry) => normalizeProjectFileFolderPath(entry.path) === normalizedPath);
+    const previewFile: ProjectFileEntry = {
+      ...file,
+      ...(indexedFile || {}),
+      path: indexedFile?.path || file.path,
+      key: indexedFile?.key || file.key || file.path,
+      size: indexedFile?.size ?? file.size ?? 0,
+      type: indexedFile?.type || file.type || 'file',
+    };
+    setWorkItemProjectFilePreview(previewFile);
+    setSelectedProjectFile(previewFile);
+    setError('');
+    await loadProjectFilePreview(previewFile);
   };
 
   const buildAgentMessagePayload = (text: string, attachments: AgentMessageAttachment[]) => {
@@ -5439,9 +5811,9 @@ export function ProjectDetail() {
   }, [activeAssignments, handoffArtifacts.length, memories.length, project?.brief, project?.summary]);
 
   const workflowProgress = useMemo(() => {
-    const hasPlan = (project?.goals?.length || 0) > 0 || workItems.length > 0;
-    const hasDispatch = activeAssignments.length > 0 || workItems.some((item) => (item._count?.assignments || 0) > 0);
-    const hasExecution = workItems.some((item) => (item._count?.runs || 0) > 0);
+    const hasPlan = (project?.goals?.length || 0) > 0 || homeWorkItemsForUi.length > 0;
+    const hasDispatch = activeAssignments.length > 0 || homeWorkItemsForUi.some((item) => (item._count?.assignments || 0) > 0);
+    const hasExecution = homeWorkItemsForUi.some((item) => (item._count?.runs || 0) > 0 || WORK_ITEM_ACCEPTED_STATUSES.has(item.status));
     const hasReview = reviews.length > 0;
     const hasMemory = memories.length > 0;
     return WORKFLOW_STEPS.map((step) => ({
@@ -5459,7 +5831,7 @@ export function ProjectDetail() {
                   ? hasReview
                   : hasMemory,
     }));
-  }, [activeAssignments.length, memories.length, project?.brief, project?.goals?.length, project?.summary, reviews.length, workItems]);
+  }, [activeAssignments.length, homeWorkItemsForUi, memories.length, project?.brief, project?.goals?.length, project?.summary, reviews.length]);
 
   const selectedTaskPacketPreview = useMemo(() => {
     if (!selectedWorkItemDetail) return null;
@@ -6417,6 +6789,27 @@ export function ProjectDetail() {
     }
   };
 
+  const handleDeleteGoal = async (goal: ProjectGoalOption) => {
+    if (!id || !canManageProject || deletingGoalId) return;
+    const confirmed = window.confirm(
+      `Delete goal "${goal.title}"?\n\nLinked unfinished work will be cancelled, and linked work items will be detached from this goal.`,
+    );
+    if (!confirmed) return;
+    setDeletingGoalId(goal.id);
+    setError('');
+    try {
+      await api.projects.goals.delete(id, goal.id, {
+        confirmation: 'delete',
+        cascade: true,
+      });
+      await loadProject();
+    } catch (err: any) {
+      setError(err.message || 'Failed to delete goal');
+    } finally {
+      setDeletingGoalId('');
+    }
+  };
+
   const handleCreateFeature = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!id) return;
@@ -6639,6 +7032,10 @@ export function ProjectDetail() {
 
   const handleOpenLaunchAgentRuntime = (role: string, memberId?: string, mode: AgentLaunchMode = DEFAULT_AGENT_LAUNCH_MODE) => {
     if (isReadOnly) return;
+    if (activeAgentCapacityReached && launchWouldAddActiveAgent(memberId)) {
+      setError(activeAgentCapacityMessage);
+      return;
+    }
     const defaults = projectRoleAgentDefaultsFromSettings(project?.settings || null)[role] || {};
     const defaultMode = defaults.launchMode || mode;
     const requestedMode = normalizeAvailableLaunchMode(defaultMode);
@@ -6828,6 +7225,10 @@ export function ProjectDetail() {
 
   const handleLaunchAgentProfile = async (profile: ProjectAgentProfile, memberId?: string) => {
     if (!id || isReadOnly) return;
+    if (activeAgentCapacityReached && launchWouldAddActiveAgent(memberId)) {
+      setError(activeAgentCapacityMessage);
+      return;
+    }
     if (isCloudAgentLaunchMode(profile.launchMode)) {
       setError(CLOUD_AGENT_UNAVAILABLE_NOTICE);
       return;
@@ -6852,6 +7253,11 @@ export function ProjectDetail() {
 
   const handleConfirmLaunchAgentRuntime = async () => {
     if (!id || isReadOnly || !pendingAgentLaunch) return;
+    if (activeAgentCapacityReached && launchWouldAddActiveAgent(pendingAgentLaunch.memberId)) {
+      appendLaunchLog('error', activeAgentCapacityMessage);
+      setError(activeAgentCapacityMessage);
+      return;
+    }
     if (isCloudAgentLaunchMode(launchMode)) {
       appendLaunchLog('error', CLOUD_AGENT_UNAVAILABLE_NOTICE);
       setError(CLOUD_AGENT_UNAVAILABLE_NOTICE);
@@ -7664,6 +8070,7 @@ export function ProjectDetail() {
     setWorkItemComment('');
     setWorkItemCommentAttachments([]);
     setDetailAssigneeUserId('');
+    setWorkItemDetailTab('details');
   }, [selectedWorkItemId, id]);
 
   useEffect(() => {
@@ -7706,6 +8113,197 @@ export function ProjectDetail() {
       setActiveProjectSection('members');
     }
   }, []);
+  const pendingAgentLaunchCapacityBlocked = pendingAgentLaunch
+    ? activeAgentCapacityReached && launchWouldAddActiveAgent(pendingAgentLaunch.memberId)
+    : false;
+
+  const renderProjectOutputButton = (file: ProjectFileEntry, className = '') => (
+    <Button
+      key={file.path}
+      type="button"
+      size="sm"
+      variant="outline"
+      className={`min-w-0 justify-start gap-2 ${className}`}
+      disabled={!canAccessProjectFiles || file.type === 'folder'}
+      onClick={() => handleOpenWorkItemProjectFilePreview(file)}
+    >
+      <FileText className="h-4 w-4 shrink-0" />
+      <span className="truncate">{file.path}</span>
+    </Button>
+  );
+
+  const renderGoalProgressCard = (
+    summary: (typeof homeGoalSummaries)[number],
+    options: { compact?: boolean } = {},
+  ) => {
+    const { goal, items, statusCounts, acceptedCount, activeCount, outputFiles, progress } = summary;
+    const goalGlobals = goalGlobalsByGoalId.get(goal.id) || [];
+    const orderedStatuses = Object.entries(statusCounts)
+      .filter(([, count]) => count > 0)
+      .sort(([left], [right]) => {
+        const leftIndex = WORK_ITEM_STATUS_OPTIONS.indexOf(left);
+        const rightIndex = WORK_ITEM_STATUS_OPTIONS.indexOf(right);
+        return (leftIndex === -1 ? 99 : leftIndex) - (rightIndex === -1 ? 99 : rightIndex);
+      });
+    const orderedItems = [...items].sort((left, right) => {
+      const leftActive = WORK_ITEM_ACTIVE_STATUSES.has(left.status) ? 0 : 1;
+      const rightActive = WORK_ITEM_ACTIVE_STATUSES.has(right.status) ? 0 : 1;
+      return leftActive - rightActive || new Date(right.updatedAt || 0).getTime() - new Date(left.updatedAt || 0).getTime();
+    });
+    const visibleItemCount = options.compact ? 4 : 6;
+    const visibleOutputCount = options.compact ? 3 : 5;
+    const itemsExpanded = Boolean(expandedHomeGoalItemIds[goal.id]);
+    const outputsExpanded = Boolean(expandedHomeGoalOutputIds[goal.id]);
+    const visibleItems = itemsExpanded ? orderedItems : orderedItems.slice(0, visibleItemCount);
+    const visibleOutputFiles = outputsExpanded ? outputFiles : outputFiles.slice(0, visibleOutputCount);
+    const goalDescription = typeof (goal as any).description === 'string' ? (goal as any).description : '';
+
+    return (
+      <div key={goal.id} className="rounded-lg border bg-background p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0 space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant={goal.status === 'DONE' ? 'success' : goal.status === 'BLOCKED' ? 'destructive' : 'secondary'}>
+                {goal.status}
+              </Badge>
+              <Badge variant="outline">{acceptedCount}/{items.length} accepted</Badge>
+              {activeCount ? <Badge variant="warning">{activeCount} active</Badge> : null}
+              {goalGlobals.length ? <Badge variant="secondary">{goalGlobals.length} vars</Badge> : null}
+            </div>
+            <h3 className="whitespace-pre-wrap break-words text-base font-semibold leading-6">{goal.title}</h3>
+            {goalDescription ? (
+              <p className="whitespace-pre-wrap break-words text-sm leading-6 text-muted-foreground">{goalDescription}</p>
+            ) : null}
+          </div>
+          <div className="w-full shrink-0 lg:w-52">
+            <div className="mb-2 flex items-center justify-between text-xs text-muted-foreground">
+              <span>Progress</span>
+              <span>{progress}%</span>
+            </div>
+            <div className="h-2 overflow-hidden rounded-full bg-muted">
+              <div className="h-full rounded-full bg-primary" style={{ width: `${progress}%` }} />
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(260px,0.9fr)]">
+          <div className="space-y-3">
+            <div className="flex flex-wrap gap-2">
+              {orderedStatuses.length ? (
+                orderedStatuses.map(([status, count]) => (
+                  <Badge key={status} variant={WORK_ITEM_STATUS_VARIANT[status] || 'secondary'}>
+                    {status} {count}
+                  </Badge>
+                ))
+              ) : (
+                <Badge variant="secondary">No items</Badge>
+              )}
+            </div>
+            {orderedItems.length ? (
+              <div className="space-y-2">
+                {visibleItems.map((item) => {
+                  const outputCount = workItemOutputProjectFilePaths(item).length;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      className="w-full rounded-md border bg-muted/10 px-3 py-2 text-left transition-colors hover:border-primary/50"
+                      onClick={() => handleOpenWorkItemFromHome(item.id)}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="min-w-0 flex-1 truncate text-sm font-medium">{item.title}</p>
+                        <Badge variant={WORK_ITEM_STATUS_VARIANT[item.status] || 'secondary'}>{item.status}</Badge>
+                      </div>
+                      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                        <span>{item.workType}</span>
+                        <span>{item._count?.assignments || item.assignments?.length || 0} assignments</span>
+                        <span>{outputCount} outputs</span>
+                      </div>
+                    </button>
+                  );
+                })}
+                {orderedItems.length > visibleItemCount ? (
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 rounded px-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                    aria-expanded={itemsExpanded}
+                    onClick={() => setExpandedHomeGoalItemIds((current) => ({ ...current, [goal.id]: !itemsExpanded }))}
+                  >
+                    {itemsExpanded ? 'Show fewer linked items' : `+${orderedItems.length - visibleItemCount} more linked items`}
+                    <ChevronDown className={`h-3.5 w-3.5 transition-transform ${itemsExpanded ? 'rotate-180' : ''}`} />
+                  </button>
+                ) : null}
+              </div>
+            ) : (
+              <div className="rounded-md border border-dashed px-3 py-4 text-sm text-muted-foreground">
+                No work items are linked to this goal yet.
+              </div>
+            )}
+          </div>
+
+          <div className="space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm font-medium">Outputs</p>
+              <Badge variant="outline">{outputFiles.length}</Badge>
+            </div>
+            {outputFiles.length ? (
+              <div className="space-y-2">
+                {visibleOutputFiles.map((file) => renderProjectOutputButton(file, 'w-full'))}
+                {outputFiles.length > visibleOutputCount ? (
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 rounded px-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                    aria-expanded={outputsExpanded}
+                    onClick={() => setExpandedHomeGoalOutputIds((current) => ({ ...current, [goal.id]: !outputsExpanded }))}
+                  >
+                    {outputsExpanded ? 'Show fewer output files' : `+${outputFiles.length - visibleOutputCount} more output files`}
+                    <ChevronDown className={`h-3.5 w-3.5 transition-transform ${outputsExpanded ? 'rotate-180' : ''}`} />
+                  </button>
+                ) : null}
+              </div>
+            ) : (
+              <div className="rounded-md border border-dashed px-3 py-4 text-sm text-muted-foreground">
+                No shared output files are linked yet.
+              </div>
+            )}
+            {canManageProject ? (
+              <div className="flex flex-wrap gap-2 pt-1">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    setWorkItemForm((prev) => ({ ...prev, goalId: goal.id, featureId: '' }));
+                    openNewWorkItemForm();
+                  }}
+                >
+                  <Plus className="mr-2 h-4 w-4" />
+                  Work Item
+                </Button>
+                {canEditProjectGlobals ? (
+                  <Button type="button" size="sm" variant="outline" onClick={() => handleOpenGoalGlobals(goal)}>
+                    <KeyRound className="mr-2 h-4 w-4" />
+                    Variables
+                  </Button>
+                ) : null}
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="gap-2 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                  disabled={deletingGoalId === goal.id}
+                  onClick={() => handleDeleteGoal(goal)}
+                >
+                  <Trash2 className="h-4 w-4" />
+                  {deletingGoalId === goal.id ? 'Deleting...' : 'Delete'}
+                </Button>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   if (loading) {
     return (
@@ -7936,7 +8534,7 @@ export function ProjectDetail() {
                   </div>
                   <div className="rounded-lg border bg-muted/20 px-4 py-3">
                     <p className="text-xs uppercase tracking-wide text-muted-foreground">Work Items</p>
-                    <p className="mt-2 text-2xl font-semibold">{projectWorkItemTotal}</p>
+                    <p className="mt-2 text-2xl font-semibold">{projectAllWorkItemTotal}</p>
                   </div>
                   <div className="rounded-lg border bg-muted/20 px-4 py-3">
                     <p className="text-xs uppercase tracking-wide text-muted-foreground">Memories</p>
@@ -7962,7 +8560,7 @@ export function ProjectDetail() {
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <Badge variant={activeAgentCount >= maxActiveAgentsNumber ? 'warning' : 'secondary'}>
+                  <Badge variant={activeAgentCapacityReached ? 'warning' : 'secondary'}>
                     Agents {activeAgentCount}/{maxActiveAgents}
                   </Badge>
                   <Badge variant={activeGoalCount >= maxActiveGoalsNumber ? 'warning' : 'secondary'}>
@@ -8204,18 +8802,18 @@ export function ProjectDetail() {
                   </div>
                   <Badge variant="default">Primary action</Badge>
                 </div>
-                <div className="grid gap-3 lg:grid-cols-[1fr_auto]">
-                  <input
-                    className="h-12 w-full rounded-md border border-primary/40 bg-background px-4 text-base shadow-sm outline-none transition-colors placeholder:text-muted-foreground focus:border-primary"
+                <div className="grid gap-3 lg:grid-cols-[1fr_auto] lg:items-start">
+                  <textarea
+                    className="min-h-[96px] w-full rounded-md border border-primary/40 bg-background px-4 py-3 text-base leading-6 shadow-sm outline-none transition-colors placeholder:text-muted-foreground focus:border-primary"
                     value={goalForm.title}
                     onChange={(e) => setGoalForm((prev) => ({ ...prev, title: e.target.value }))}
-                    placeholder="Type the next project outcome"
+                    placeholder="Describe the next project outcome"
                     aria-label="New goal title"
                     required
                   />
                   <Button
                     type="submit"
-                    className="h-12 gap-2 px-5 text-base"
+                    className="h-12 gap-2 px-5 text-base lg:mt-0"
                     disabled={savingGoal || !goalForm.title.trim()}
                   >
                     <Plus className="h-4 w-4" />
@@ -8225,85 +8823,24 @@ export function ProjectDetail() {
               </form>
             ) : null}
 
-            <div className="grid gap-4 md:grid-cols-2">
-              <div className="rounded-lg border bg-muted/10 p-4">
-                <div className="mb-3 flex items-center gap-2">
+            <div className="rounded-lg border bg-muted/10 p-4">
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
                   <Sparkles className="h-4 w-4 text-primary" />
-                  <h2 className="font-semibold">Current Goals</h2>
+                  <h2 className="font-semibold">Goal Progress</h2>
                 </div>
-                <div className="space-y-2">
-                  {project.goals?.length ? (
-                    project.goals.map((goal: any) => {
-                        const goalGlobals = goalGlobalsByGoalId.get(goal.id) || [];
-                        const isExpanded = !!expandedHomeGoalIds[goal.id];
-                        return (
-                          <div key={goal.id} className="rounded-md border px-3 py-2">
-                            <button
-                              type="button"
-                              className="flex w-full items-center justify-between gap-3 text-left"
-                              onClick={() => setExpandedHomeGoalIds((prev) => ({ ...prev, [goal.id]: !prev[goal.id] }))}
-                            >
-                              <p className="min-w-0 truncate font-medium">{goal.title}</p>
-                              {isExpanded ? (
-                                <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
-                              ) : (
-                                <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
-                              )}
-                            </button>
-                            {isExpanded ? (
-                              <div className="mt-3 border-t pt-3">
-                                <div className="mb-2 flex flex-wrap gap-2">
-                                  {goalGlobals.length ? <Badge variant="secondary">{goalGlobals.length} vars</Badge> : null}
-                                  <Badge variant="outline">{goal.status}</Badge>
-                                </div>
-                                {goal.description && (
-                                  <p className="text-sm text-muted-foreground">{goal.description}</p>
-                                )}
-                                {canManageProject && (
-                                  <div className="mt-3 flex flex-wrap gap-2">
-                                    <Button
-                                      type="button"
-                                      size="sm"
-                                      variant="outline"
-                                      onClick={() => setFeatureForm((prev) => ({ ...prev, goalId: goal.id }))}
-                                    >
-                                      Add Feature Group
-                                    </Button>
-                                    <Button
-                                      type="button"
-                                      size="sm"
-                                      variant="secondary"
-                                      onClick={() => {
-                                        setWorkItemForm((prev) => ({ ...prev, goalId: goal.id, featureId: '' }));
-                                        openNewWorkItemForm();
-                                      }}
-                                    >
-                                      Add Work Item
-                                    </Button>
-                                    {canEditProjectGlobals ? (
-                                      <Button
-                                        type="button"
-                                        size="sm"
-                                        variant="outline"
-                                        onClick={() => handleOpenGoalGlobals(goal)}
-                                      >
-                                        <KeyRound className="mr-2 h-4 w-4" />
-                                        Variables
-                                      </Button>
-                                    ) : null}
-                                  </div>
-                                )}
-                              </div>
-                            ) : null}
-                          </div>
-                        );
-                      })
-                  ) : (
-                    <p className="text-sm text-muted-foreground">No goals yet.</p>
-                  )}
-                </div>
+                <Badge variant="outline">{projectAllWorkItemTotal} work items</Badge>
               </div>
+              <div className="space-y-4">
+                {homeGoalSummaries.length ? (
+                  homeGoalSummaries.map((summary) => renderGoalProgressCard(summary))
+                ) : (
+                  <p className="rounded-md border border-dashed px-3 py-4 text-sm text-muted-foreground">No goals yet.</p>
+                )}
+              </div>
+            </div>
 
+            {project.features?.length ? (
               <div className="rounded-lg border bg-muted/10 p-4">
                 <div className="mb-3 flex items-center gap-2">
                   <Layers3 className="h-4 w-4 text-primary" />
@@ -8375,7 +8912,7 @@ export function ProjectDetail() {
                   )}
                 </div>
               </div>
-            </div>
+            ) : null}
 
             <div className="rounded-lg border bg-muted/10 p-4">
               <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -8411,7 +8948,7 @@ export function ProjectDetail() {
                 <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                   <div className="flex items-center gap-2">
                     <Workflow className="h-4 w-4 text-primary" />
-                    <h2 className="font-semibold">Delivery Lanes</h2>
+                    <h2 className="font-semibold">Work Progress</h2>
                   </div>
                   <Button
                     type="button"
@@ -8463,7 +9000,7 @@ export function ProjectDetail() {
                   </div>
                 ) : (
                   <div className="rounded-md border bg-background px-3 py-4 text-sm text-muted-foreground">
-                    No work items have entered the board yet.
+                    No work items have been created yet.
                   </div>
                 )}
               </div>
@@ -8504,24 +9041,37 @@ export function ProjectDetail() {
 
                     <div className="space-y-2">
                       <div className="flex items-center justify-between gap-3">
-                        <p className="text-sm font-medium">Artifacts</p>
-                        <Badge variant="outline">{homeRecentArtifacts.length}</Badge>
+                        <p className="text-sm font-medium">Outputs</p>
+                        <Badge variant="outline">{homeOutputFiles.length}</Badge>
                       </div>
-                      {homeRecentArtifacts.length ? (
-                        homeRecentArtifacts.map((artifact: any) => (
-                          <div key={artifact.id} className="rounded-md border bg-background px-3 py-2">
-                            <p className="truncate text-sm font-medium">{artifact.title || artifact.artifactType}</p>
-                            <p className="mt-1 truncate text-xs text-muted-foreground">
-                              {artifact.workItem?.title ||
-                                workItems.find((item) => item.id === artifact.workItemId)?.title ||
-                                'Project-level artifact'}
-                            </p>
-                            <p className="mt-2 text-xs text-muted-foreground">{formatProjectDate(artifact.createdAt || artifact.updatedAt)}</p>
-                          </div>
-                        ))
+                      {homeOutputFiles.length ? (
+                        <div className="space-y-2">
+                          {homeOutputFiles.slice(0, 5).map((file) => (
+                            <div key={file.path} className="rounded-md border bg-background px-3 py-2">
+                              <div className="flex min-w-0 items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <p className="truncate text-sm font-medium">{file.path}</p>
+                                  <p className="mt-1 text-xs text-muted-foreground">
+                                    {file.size ? formatBytes(file.size) : 'Project file'}{file.lastModified ? ` · ${formatProjectDate(file.lastModified)}` : ''}
+                                  </p>
+                                </div>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="ghost"
+                                  className="shrink-0"
+                                  disabled={!canAccessProjectFiles}
+                                  onClick={() => handleOpenWorkItemProjectFilePreview(file)}
+                                >
+                                  Open
+                                </Button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
                       ) : (
                         <p className="rounded-md border bg-background px-3 py-3 text-sm text-muted-foreground">
-                          No artifacts yet.
+                          No shared output files yet.
                         </p>
                       )}
                     </div>
@@ -8770,7 +9320,7 @@ export function ProjectDetail() {
                       <Badge
                         className="whitespace-normal text-center leading-5"
                         variant={
-                          activeAgentCount >= maxActiveAgentsNumber || activeGoalCount >= maxActiveGoalsNumber
+                          activeAgentCapacityReached || activeGoalCount >= maxActiveGoalsNumber
                             ? 'warning'
                             : 'secondary'
                         }
@@ -9268,7 +9818,8 @@ export function ProjectDetail() {
                       type="button"
                       data-tour="project-create-agent"
                       className="w-full rounded-lg border border-dashed bg-muted/10 px-3 py-3 text-left transition-colors hover:border-primary/60 hover:bg-primary/5 disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled={isReadOnly}
+                      disabled={isReadOnly || activeAgentCapacityReached}
+                      title={activeAgentCapacityReached ? activeAgentCapacityMessage : undefined}
                       onClick={() => handleOpenLaunchAgentRuntime(hasActiveLeadAgent ? 'WORKER_AGENT' : 'LEAD_AGENT')}
                     >
                       <div className="flex items-start gap-3">
@@ -9292,6 +9843,7 @@ export function ProjectDetail() {
 	                  {roleCoverage.map(({ role, label, members, contract }) => {
 	                    const roleRuntimes = runtimesByRole.get(role) || [];
 	                    const launchable = !isReadOnly && role !== 'OWNER';
+	                    const roleLaunchCapacityBlocked = activeAgentCapacityReached && launchWouldAddActiveAgent(members[0]?.id);
 	                    const selectedRoleMember = members.find((member) => member.id === selectedAgentMemberId);
 	                    const firstSelectableMemberId = roleRuntimes[0]?.memberId || members[0]?.id;
 	                    const isSelectedRole = Boolean(selectedRoleMember);
@@ -9342,8 +9894,8 @@ export function ProjectDetail() {
                                   size="icon"
                                   variant="secondary"
                                   className="h-8 w-8"
-                                  title={members.length ? 'Launch local Docker agent' : 'Assign and launch local Docker agent'}
-                                  disabled={launchingRole === role}
+                                  title={roleLaunchCapacityBlocked ? activeAgentCapacityMessage : members.length ? 'Launch local Docker agent' : 'Assign and launch local Docker agent'}
+                                  disabled={launchingRole === role || roleLaunchCapacityBlocked}
                                   onClick={(event) => {
                                     event.stopPropagation();
                                     handleOpenLaunchAgentRuntime(role, members[0]?.id, 'local-docker');
@@ -9357,8 +9909,8 @@ export function ProjectDetail() {
                                   size="icon"
                                   variant="secondary"
                                   className="h-8 w-8"
-                                  title={members.length ? 'Queue local runner agent' : 'Assign and queue local runner agent'}
-                                  disabled={launchingRole === role}
+                                  title={roleLaunchCapacityBlocked ? activeAgentCapacityMessage : members.length ? 'Queue local runner agent' : 'Assign and queue local runner agent'}
+                                  disabled={launchingRole === role || roleLaunchCapacityBlocked}
                                   onClick={(event) => {
                                     event.stopPropagation();
                                     handleOpenLaunchAgentRuntime(role, members[0]?.id, 'local-runner');
@@ -9371,8 +9923,8 @@ export function ProjectDetail() {
                                 size="icon"
                                 variant="secondary"
                                 className="h-8 w-8"
-                                title={members.length ? 'Queue local agent' : 'Assign and queue local agent'}
-                                disabled={launchingRole === role}
+                                title={roleLaunchCapacityBlocked ? activeAgentCapacityMessage : members.length ? 'Queue local agent' : 'Assign and queue local agent'}
+                                disabled={launchingRole === role || roleLaunchCapacityBlocked}
                                 onClick={(event) => {
                                   event.stopPropagation();
                                   handleOpenLaunchAgentRuntime(role, members[0]?.id, 'local-codex');
@@ -9913,6 +10465,17 @@ export function ProjectDetail() {
                                 )}
                               </div>
                             </div>
+                            {selectedAgentErrorDetail && (
+                              <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs leading-5 text-destructive">
+                                <div className="flex items-start gap-2">
+                                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                                  <div>
+                                    <p className="font-medium">Runtime error</p>
+                                    <p className="mt-0.5 break-words">{selectedAgentErrorDetail}</p>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
                           </div>
 
                           <div
@@ -10872,7 +11435,12 @@ export function ProjectDetail() {
                                 {selectedAgentMember.role.includes('_AGENT') && (
                                   <Button
                                     variant="secondary"
-                                    disabled={isReadOnly}
+                                    disabled={isReadOnly || (activeAgentCapacityReached && launchWouldAddActiveAgent(selectedAgentMember.id))}
+                                    title={
+                                      activeAgentCapacityReached && launchWouldAddActiveAgent(selectedAgentMember.id)
+                                        ? activeAgentCapacityMessage
+                                        : undefined
+                                    }
                                     onClick={() => handleOpenLaunchAgentRuntime(selectedAgentMember.role, selectedAgentMember.id)}
                                   >
                                     <Rocket className="mr-2 h-4 w-4" />
@@ -11038,7 +11606,12 @@ export function ProjectDetail() {
                                   {!IS_PRODUCTION_AGENTCRAFT_HOST && (
                                     <Button
                                     variant="secondary"
-                                    disabled={isReadOnly}
+                                    disabled={isReadOnly || (activeAgentCapacityReached && launchWouldAddActiveAgent(selectedAgentMember.id))}
+                                    title={
+                                      activeAgentCapacityReached && launchWouldAddActiveAgent(selectedAgentMember.id)
+                                        ? activeAgentCapacityMessage
+                                        : undefined
+                                    }
                                     onClick={() => handleOpenLaunchAgentRuntime(selectedAgentMember.role, selectedAgentMember.id, 'local-docker')}
                                   >
                                     <Rocket className="mr-2 h-4 w-4" />
@@ -11048,7 +11621,12 @@ export function ProjectDetail() {
                                   {IS_PRODUCTION_AGENTCRAFT_HOST && (
                                     <Button
                                       variant="secondary"
-                                      disabled={isReadOnly}
+                                      disabled={isReadOnly || (activeAgentCapacityReached && launchWouldAddActiveAgent(selectedAgentMember.id))}
+                                      title={
+                                        activeAgentCapacityReached && launchWouldAddActiveAgent(selectedAgentMember.id)
+                                          ? activeAgentCapacityMessage
+                                          : undefined
+                                      }
                                       onClick={() => handleOpenLaunchAgentRuntime(selectedAgentMember.role, selectedAgentMember.id, 'local-runner')}
                                     >
                                       <Route className="mr-2 h-4 w-4" />
@@ -11058,7 +11636,12 @@ export function ProjectDetail() {
                                   <Button
                                     variant="secondary"
                                     data-tour="project-local-agent"
-                                    disabled={isReadOnly}
+                                    disabled={isReadOnly || (activeAgentCapacityReached && launchWouldAddActiveAgent(selectedAgentMember.id))}
+                                    title={
+                                      activeAgentCapacityReached && launchWouldAddActiveAgent(selectedAgentMember.id)
+                                        ? activeAgentCapacityMessage
+                                        : undefined
+                                    }
                                     onClick={() => handleOpenLaunchAgentRuntime(selectedAgentMember.role, selectedAgentMember.id, 'local-codex')}
                                   >
                                     <Brain className="mr-2 h-4 w-4" />
@@ -11300,6 +11883,12 @@ export function ProjectDetail() {
                             ? 'This launch is attached to an existing project member.'
                             : 'Launching without an existing member creates a new member instance for the selected role.'}
                         </p>
+                        {pendingAgentLaunchCapacityBlocked && (
+                          <div className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-900 dark:text-amber-100">
+                            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                            <p>{activeAgentCapacityMessage}</p>
+                          </div>
+                        )}
                       </div>
 
                       <div className="space-y-3">
@@ -11323,8 +11912,19 @@ export function ProjectDetail() {
                           <Button
                             type="button"
                             variant="outline"
-                            title={selectedLaunchProfileCloudUnavailable ? 'Cloud Agent is temporarily unavailable' : undefined}
-                            disabled={!selectedAgentProfileId || launchingRole === pendingAgentLaunch.role || selectedLaunchProfileCloudUnavailable}
+                            title={
+                              pendingAgentLaunchCapacityBlocked
+                                ? activeAgentCapacityMessage
+                                : selectedLaunchProfileCloudUnavailable
+                                  ? 'Cloud Agent is temporarily unavailable'
+                                  : undefined
+                            }
+                            disabled={
+                              !selectedAgentProfileId ||
+                              launchingRole === pendingAgentLaunch.role ||
+                              selectedLaunchProfileCloudUnavailable ||
+                              pendingAgentLaunchCapacityBlocked
+                            }
                             onClick={() => {
                               const profile = agentProfiles.find((item) => item.id === selectedAgentProfileId);
                               if (profile) void handleLaunchAgentProfile(profile, pendingAgentLaunch.memberId);
@@ -11803,19 +12403,28 @@ export function ProjectDetail() {
                       <Button
                         variant="secondary"
                         data-tour="project-confirm-local-agent"
-                        title={isCloudAgentLaunchMode(launchMode) ? 'Cloud Agent is temporarily unavailable' : undefined}
+                        title={
+                          pendingAgentLaunchCapacityBlocked
+                            ? activeAgentCapacityMessage
+                            : isCloudAgentLaunchMode(launchMode)
+                              ? 'Cloud Agent is temporarily unavailable'
+                              : undefined
+                        }
                         disabled={
                           launchingRole === pendingAgentLaunch.role ||
                           savingLaunchConfig ||
                           savingAgentProfile ||
                           (!launchModelApiOptional && !showNewLaunchConfig && !launchLlmConfigId) ||
-                          isCloudAgentLaunchMode(launchMode)
+                          isCloudAgentLaunchMode(launchMode) ||
+                          pendingAgentLaunchCapacityBlocked
                         }
                         onClick={handleConfirmLaunchAgentRuntime}
                       >
                         <Rocket className="mr-2 h-4 w-4" />
                         {launchingRole === pendingAgentLaunch.role
                           ? 'Launching...'
+                          : pendingAgentLaunchCapacityBlocked
+                            ? 'Capacity Reached'
                           : isCloudAgentLaunchMode(launchMode)
                             ? 'Cloud Agent Unavailable'
                             : launchMode === 'local-codex'
@@ -12465,6 +13074,15 @@ export function ProjectDetail() {
                             <div className="flex min-h-0 flex-1 items-center justify-center p-3">
                               {loadingProjectFilePreview ? (
                                 <p className="text-sm text-muted-foreground">Loading preview...</p>
+                              ) : projectFilePreviewError ? (
+                                <div className="space-y-3 text-center text-sm text-muted-foreground">
+                                  <AlertTriangle className="mx-auto h-8 w-8 text-destructive" />
+                                  <p>{projectFilePreviewError}</p>
+                                  <Button type="button" size="sm" variant="secondary" onClick={() => handleDownloadProjectFile(selectedProjectFile.path)}>
+                                    <Download className="mr-2 h-4 w-4" />
+                                    Download file
+                                  </Button>
+                                </div>
                               ) : selectedProjectFile.type === 'folder' ? (
                                 <div className="space-y-2 text-center text-sm text-muted-foreground">
                                   <FolderOpen className="mx-auto h-8 w-8 text-primary" />
@@ -12535,6 +13153,28 @@ export function ProjectDetail() {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-6">
+              <div className="rounded-lg border bg-muted/10 p-4">
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <Route className="h-4 w-4 text-primary" />
+                    <h3 className="font-medium">Goal Map</h3>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Badge variant="outline">{projectAllWorkItemTotal} work items</Badge>
+                    <Badge variant="outline">{homeOutputFiles.length} outputs</Badge>
+                  </div>
+                </div>
+                <div className="space-y-3">
+                  {homeGoalSummaries.length ? (
+                    homeGoalSummaries.map((summary) => renderGoalProgressCard(summary, { compact: true }))
+                  ) : (
+                    <p className="rounded-md border border-dashed bg-background px-3 py-4 text-sm text-muted-foreground">
+                      Create a goal to start building the project topology.
+                    </p>
+                  )}
+                </div>
+              </div>
+
               <form onSubmit={handleCreateGoal} className="space-y-4 border-b pb-6">
                 <div className="space-y-1">
                   <h3 className="font-medium">Add Goal</h3>
@@ -12544,8 +13184,8 @@ export function ProjectDetail() {
                 </div>
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Goal Title</label>
-                  <input
-                    className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                  <textarea
+                    className="min-h-[88px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm leading-6"
                     value={goalForm.title}
                     onChange={(e) => setGoalForm((prev) => ({ ...prev, title: e.target.value }))}
                     required
@@ -12633,28 +13273,17 @@ export function ProjectDetail() {
                     />
                   </div>
                   <select
-                    className="h-10 min-w-[190px] rounded-md border border-input bg-background px-3 text-sm"
-                    value={workStatusFilter}
-                    onChange={(e) => setWorkStatusFilter(e.target.value)}
+                    className="h-10 min-w-[220px] rounded-md border border-input bg-background px-3 text-sm"
+                    value={workGoalFilter}
+                    onChange={(e) => setWorkGoalFilter(e.target.value)}
                   >
-                    <option value="ALL">
-                      {showClosedWorkItems ? 'All statuses' : 'Active statuses'} ({projectWorkItemTotal})
-                    </option>
-                    {WORK_ITEM_STATUS_OPTIONS.map((status) => (
-                      <option key={status} value={status}>
-                        {status.split('_').join(' ')} ({workStatusCounts[status] || 0})
+                    <option value="ALL">All goals</option>
+                    {((project.goals || []) as ProjectGoalOption[]).map((goal) => (
+                      <option key={goal.id} value={goal.id}>
+                        {goal.title}
                       </option>
                     ))}
                   </select>
-                  <label className="flex h-10 items-center gap-2 rounded-md border border-input bg-background px-3 text-sm">
-                    <input
-                      type="checkbox"
-                      className="h-4 w-4"
-                      checked={showClosedWorkItems}
-                      onChange={(e) => setShowClosedWorkItems(e.target.checked)}
-                    />
-                    <span>Show closed</span>
-                  </label>
                   <select
                     className="h-10 min-w-[120px] rounded-md border border-input bg-background px-3 text-sm"
                     value={workItemPageSize}
@@ -12672,6 +13301,34 @@ export function ProjectDetail() {
               </div>
             </CardHeader>
             <CardContent className="space-y-4">
+              <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/10 p-2">
+                <span className="px-2 text-sm font-medium text-muted-foreground">Status</span>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={workStatusFilter === 'ALL' ? 'default' : 'outline'}
+                  className="h-8 gap-2"
+                  aria-pressed={workStatusFilter === 'ALL'}
+                  onClick={() => setWorkStatusFilter('ALL')}
+                >
+                  All
+                  <span className="text-xs opacity-80">{workStatusAllCount}</span>
+                </Button>
+                {workStatusFilterOptions.map((status) => (
+                  <Button
+                    key={status}
+                    type="button"
+                    size="sm"
+                    variant={workStatusFilter === status ? 'default' : 'outline'}
+                    className="h-8 gap-2"
+                    aria-pressed={workStatusFilter === status}
+                    onClick={() => setWorkStatusFilter(status)}
+                  >
+                    {status.split('_').join(' ')}
+                    <span className="text-xs opacity-80">{workStatusCounts[status] || 0}</span>
+                  </Button>
+                ))}
+              </div>
               <div className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-md border bg-muted/10 px-4 py-2 text-sm">
                 <div className="flex items-center gap-2">
                   <span className="text-muted-foreground">Showing</span>
@@ -12793,7 +13450,7 @@ export function ProjectDetail() {
                     <Layers3 className="h-5 w-5" />
                     Work Item Detail
                   </CardTitle>
-                  <p className="text-sm text-muted-foreground">Title, details, goal/feature context, comments, and handoff.</p>
+                  <p className="text-sm text-muted-foreground">Conclusion, deliverables, details, and item flow.</p>
                 </div>
                 <Button type="button" variant="outline" onClick={openWorkItemsList}>
                   <ArrowLeft className="mr-2 h-4 w-4" />
@@ -12802,40 +13459,147 @@ export function ProjectDetail() {
               </div>
             </CardHeader>
             <CardContent className="space-y-6">
-                <div className="rounded-lg border bg-muted/10 p-4">
-                  <div className="mb-4 flex items-start justify-between gap-3">
-                    <div>
-                      <h3 className="font-medium">Work Item</h3>
-                      <p className="text-sm text-muted-foreground">Core task context for this project item.</p>
-                    </div>
-                    {selectedWorkItemForDetail ? (
-                      <div className="flex max-w-[420px] flex-col items-end gap-2 text-right">
-                        <Badge variant={WORK_ITEM_STATUS_VARIANT[selectedWorkItemForDetail.status] || 'secondary'}>
-                          {selectedWorkItemForDetail.status}
-                        </Badge>
-                        {activeAgentsForItem(selectedWorkItemForDetail).length ? (
-                          <div className="rounded-full bg-yellow-100 px-3 py-1 text-xs font-medium text-yellow-800">
-                            Working by {activeAgentsForItem(selectedWorkItemForDetail).map(formatAssigneeName).join(', ')}
-                          </div>
-                        ) : openAssignmentsForItem(selectedWorkItemForDetail).length ? (
-                          <div className="rounded-full bg-muted px-3 py-1 text-xs text-muted-foreground">
-                            Assigned to {openAssignmentsForItem(selectedWorkItemForDetail).map(formatAssigneeName).join(', ')}
-                          </div>
-                        ) : null}
-                      </div>
-                    ) : null}
-                  </div>
                   {selectedWorkItemForDetail ? (
                     <div className="space-y-4">
-                      <div className="space-y-2">
-                        <h3 className="text-lg font-semibold leading-7">{selectedWorkItemForDetail.title}</h3>
-                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                          <span>{selectedWorkItemForDetail.workType} · {selectedWorkItemForDetail.concurrencyMode || 'SINGLE'}</span>
-                          <span>Goal: {selectedWorkItemGoalTitle}</span>
-                          <span>Feature: {selectedWorkItemFeatureTitle}</span>
-                          <span>Created {formatProjectDate(selectedWorkItemForDetail.createdAt)}</span>
+                      <div className="rounded-lg border bg-background px-4 py-4">
+                        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                          <div className="min-w-0 space-y-3">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <Badge variant={WORK_ITEM_STATUS_VARIANT[selectedWorkItemForDetail.status] || 'secondary'}>
+                                {selectedWorkItemForDetail.status}
+                              </Badge>
+                              <Badge variant="outline">{selectedWorkItemForDetail.workType}</Badge>
+                              <Badge variant="secondary">{selectedWorkItemForDetail.concurrencyMode || 'SINGLE'}</Badge>
+                            </div>
+                            <h3 className="whitespace-pre-wrap break-words text-2xl font-semibold leading-8">
+                              {selectedWorkItemForDetail.title}
+                            </h3>
+                            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                              <span>Goal: {selectedWorkItemGoalTitle}</span>
+                              <span>Feature: {selectedWorkItemFeatureTitle}</span>
+                              <span>Created {formatProjectDate(selectedWorkItemForDetail.createdAt)}</span>
+                              {selectedWorkItemForDetail.updatedAt ? (
+                                <span>Updated {formatProjectDate(selectedWorkItemForDetail.updatedAt)}</span>
+                              ) : null}
+                            </div>
+                          </div>
+                          <div className="grid w-full shrink-0 grid-cols-3 gap-2 text-center sm:w-auto sm:min-w-[320px]">
+                            <div className="rounded-md border bg-muted/10 px-3 py-2">
+                              <p className="text-lg font-semibold">{selectedWorkItemOutputFiles.length}</p>
+                              <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Files</p>
+                            </div>
+                            <div className="rounded-md border bg-muted/10 px-3 py-2">
+                              <p className="text-lg font-semibold">{selectedWorkItemArtifacts.length}</p>
+                              <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Artifacts</p>
+                            </div>
+                            <div className="rounded-md border bg-muted/10 px-3 py-2">
+                              <p className="text-lg font-semibold">{selectedWorkItemReviews.length}</p>
+                              <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Reviews</p>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(280px,0.78fr)]">
+                          <div className="rounded-md border bg-muted/10 px-3 py-3">
+                            <div className="mb-2 flex items-center gap-2">
+                              <ClipboardCheck className="h-4 w-4 text-primary" />
+                              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                                {selectedWorkItemConclusion.label}
+                              </p>
+                            </div>
+                            <ExpandableLineClampText
+                              text={selectedWorkItemConclusion.text}
+                              className="whitespace-pre-wrap break-words text-sm leading-6 text-muted-foreground"
+                            />
+                          </div>
+                          <div className="rounded-md border bg-muted/10 px-3 py-3">
+                            <div className="mb-3 flex items-center justify-between gap-3">
+                              <div className="flex items-center gap-2">
+                                <FileText className="h-4 w-4 text-primary" />
+                                <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Deliverables</p>
+                              </div>
+                              <Badge variant="outline">{selectedWorkItemOutputFiles.length + selectedWorkItemArtifacts.length}</Badge>
+                            </div>
+                            {selectedWorkItemOutputFiles.length || selectedWorkItemArtifacts.length ? (
+                              <div className="space-y-2">
+                                {selectedWorkItemOutputFiles.slice(0, 4).map((file) => renderProjectOutputButton(file, 'w-full'))}
+                                {selectedWorkItemArtifacts.slice(0, 3).map((artifact: any) => (
+                                  <div key={artifact.id} className="rounded-md border bg-background px-3 py-2">
+                                    <div className="flex min-w-0 items-start justify-between gap-3">
+                                      <div className="min-w-0">
+                                        <p className="truncate text-sm font-medium">{artifact.title || artifact.artifactType}</p>
+                                        <p className="mt-1 text-xs text-muted-foreground">
+                                          {artifact.artifactType}{artifact.createdAt ? ` · ${formatProjectDate(artifact.createdAt)}` : ''}
+                                        </p>
+                                      </div>
+                                      {artifact.url ? (
+                                        <a
+                                          href={artifact.url}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          className="shrink-0 rounded-md border px-2 py-1 text-xs font-medium text-primary hover:bg-muted"
+                                        >
+                                          Open
+                                        </a>
+                                      ) : null}
+                                    </div>
+                                  </div>
+                                ))}
+                                {selectedWorkItemOutputFiles.length + selectedWorkItemArtifacts.length > 7 ? (
+                                  <p className="text-xs text-muted-foreground">
+                                    +{selectedWorkItemOutputFiles.length + selectedWorkItemArtifacts.length - 7} more deliverables
+                                  </p>
+                                ) : null}
+                              </div>
+                            ) : (
+                              <div className="rounded-md border border-dashed bg-background px-3 py-4 text-sm text-muted-foreground">
+                                No deliverables are linked yet.
+                              </div>
+                            )}
+                          </div>
                         </div>
                       </div>
+                      <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-background p-2" role="tablist" aria-label="Work item detail sections">
+                        {([
+                          { key: 'details', label: 'Details', icon: Info },
+                          { key: 'activity', label: 'Flow', icon: History, count: selectedWorkItemHistory.length },
+                          {
+                            key: 'discussion',
+                            label: 'Discussion',
+                            icon: MessageSquare,
+                            count: selectedWorkItemForDetail._count?.comments || selectedWorkItemForDetail.comments?.length || 0,
+                          },
+                          {
+                            key: 'execution',
+                            label: 'Execution',
+                            icon: Activity,
+                            count: selectedWorkItemAssignments.length + (selectedWorkItemForDetail.runs?.length || 0),
+                          },
+                        ] as Array<{ key: WorkItemDetailTab; label: string; icon: typeof Info; count?: number }>).map(({ key, label, icon: Icon, count }) => (
+                          <button
+                            key={key}
+                            type="button"
+                            role="tab"
+                            aria-selected={workItemDetailTab === key}
+                            className={`inline-flex h-9 items-center gap-2 rounded-md px-3 text-sm font-medium transition-colors ${
+                              workItemDetailTab === key
+                                ? 'bg-primary text-primary-foreground'
+                                : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+                            }`}
+                            onClick={() => setWorkItemDetailTab(key)}
+                          >
+                            <Icon className="h-4 w-4" />
+                            <span>{label}</span>
+                            {count !== undefined ? (
+                              <span className={`rounded-full px-1.5 py-0.5 text-[11px] ${workItemDetailTab === key ? 'bg-primary-foreground/20' : 'bg-muted'}`}>
+                                {count}
+                              </span>
+                            ) : null}
+                          </button>
+                        ))}
+                      </div>
+                      {workItemDetailTab === 'details' ? (
+                        <div className="space-y-4">
                       <div className="rounded-md border bg-background px-3 py-3">
                         <div className="grid gap-3 sm:grid-cols-2">
                           <div className="space-y-2">
@@ -13137,6 +13901,10 @@ export function ProjectDetail() {
                           </div>
                         </details>
                       )}
+                        </div>
+                      ) : null}
+                      {workItemDetailTab === 'activity' ? (
+                        <div className="space-y-4">
                       <div className="space-y-3">
                         <div className="flex items-center justify-between gap-2">
                           <p className="text-sm font-medium">Assignment History</p>
@@ -13325,18 +14093,42 @@ export function ProjectDetail() {
                           <p className="text-sm text-muted-foreground">Loading file events...</p>
                         ) : selectedWorkItemFileEvents.length ? (
                           <div className="space-y-2">
-                            {selectedWorkItemFileEvents.map((event) => (
-                              <div key={event.id} className="rounded-md border bg-background px-3 py-3">
-                                <div className="flex flex-wrap items-center justify-between gap-2">
-                                  <p className="min-w-0 truncate font-mono text-xs font-medium">{event.path}</p>
-                                  <span className="shrink-0 text-xs text-muted-foreground">{formatProjectDate(event.createdAt)}</span>
+                            {selectedWorkItemFileEvents.map((event) => {
+                              const canPreviewEventFile =
+                                canAccessProjectFiles &&
+                                event.file &&
+                                event.file.type !== 'folder' &&
+                                event.type !== 'PROJECT_FILE_DELETED';
+                              const content = (
+                                <>
+                                  <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <p className="min-w-0 truncate font-mono text-xs font-medium">{event.path}</p>
+                                    <span className="shrink-0 text-xs text-muted-foreground">{formatProjectDate(event.createdAt)}</span>
+                                  </div>
+                                  <p className="mt-2 text-xs text-muted-foreground">
+                                    {event.actor} - {event.title}
+                                    {event.seq ? ` #${event.seq}` : ''}
+                                  </p>
+                                </>
+                              );
+                              return canPreviewEventFile ? (
+                                <button
+                                  key={event.id}
+                                  type="button"
+                                  className="w-full rounded-md border bg-background px-3 py-3 text-left transition-colors hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                  aria-label={`Open preview for ${event.path}`}
+                                  onClick={() => {
+                                    if (event.file) void handleOpenWorkItemProjectFilePreview(event.file);
+                                  }}
+                                >
+                                  {content}
+                                </button>
+                              ) : (
+                                <div key={event.id} className="rounded-md border bg-background px-3 py-3">
+                                  {content}
                                 </div>
-                                <p className="mt-2 text-xs text-muted-foreground">
-                                  {event.actor} - {event.title}
-                                  {event.seq ? ` #${event.seq}` : ''}
-                                </p>
-                              </div>
-                            ))}
+                              );
+                            })}
                           </div>
                         ) : (
                           <div className="rounded-md border border-dashed px-3 py-3 text-sm text-muted-foreground">
@@ -13380,6 +14172,9 @@ export function ProjectDetail() {
                           </div>
                         )}
                       </div>
+                        </div>
+                      ) : null}
+                      {workItemDetailTab === 'discussion' ? (
                       <div className="space-y-3 border-t pt-4">
                         <div className="flex items-center justify-between gap-2">
                           <p className="text-sm font-medium">Comments</p>
@@ -13492,22 +14287,37 @@ export function ProjectDetail() {
                           </form>
                         )}
                       </div>
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        className="w-full"
-                        onClick={() => {
-                          setSelectedWorkItemId(selectedWorkItemForDetail.id);
-                          document.getElementById('work-item-execution-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                        }}
-                      >
-                        Open Assignment Panel
-                      </Button>
+                      ) : null}
+                      {workItemDetailTab === 'execution' ? (
+                        <div className="rounded-md border bg-background px-4 py-4">
+                          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-2">
+                                <Activity className="h-4 w-4 text-primary" />
+                                <p className="font-medium">Execution Tools</p>
+                              </div>
+                              <p className="text-sm text-muted-foreground">
+                                {selectedWorkItemAssignments.length} assignments · {selectedWorkItemForDetail.runs?.length || 0} runs
+                              </p>
+                            </div>
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              className="shrink-0"
+                              onClick={() => {
+                                setSelectedWorkItemId(selectedWorkItemForDetail.id);
+                                document.getElementById('work-item-execution-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                              }}
+                            >
+                              Open Assignment Panel
+                            </Button>
+                          </div>
+                        </div>
+                      ) : null}
                     </div>
                   ) : (
                     <p className="text-sm text-muted-foreground">Select a work item to inspect details.</p>
                   )}
-                </div>
             </CardContent>
           </Card>
 
@@ -13742,7 +14552,7 @@ export function ProjectDetail() {
             </form>
           </Card>
 
-          <Card id="work-item-execution-panel" className={activeProjectSection === 'work' && workItemsView === 'detail' ? '' : 'hidden'}>
+          <Card id="work-item-execution-panel" className={activeProjectSection === 'work' && workItemsView === 'detail' && workItemDetailTab === 'execution' ? '' : 'hidden'}>
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-xl">
                 <Layers3 className="h-5 w-5" />
@@ -15203,6 +16013,112 @@ export function ProjectDetail() {
                 <RefreshCw className={`mr-2 h-4 w-4 ${savingGoalGlobals ? 'animate-spin' : ''}`} />
                 Save & Apply Now
               </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {workItemProjectFilePreview ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 px-4 py-6 backdrop-blur-sm">
+          <div className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-lg border bg-background shadow-2xl">
+            <div className="flex shrink-0 items-start justify-between gap-4 border-b px-5 py-4">
+              <div className="min-w-0 space-y-1">
+                <p className="truncate text-lg font-semibold">{workItemProjectFilePreview.path}</p>
+                <p className="text-sm text-muted-foreground">
+                  {projectFilePreviewKind(workItemProjectFilePreview) === 'download'
+                    ? 'File'
+                    : projectFilePreviewKind(workItemProjectFilePreview).toUpperCase()}
+                  {workItemProjectFilePreview.size ? ` · ${formatBytes(workItemProjectFilePreview.size)}` : ''}
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => handleDownloadProjectFile(workItemProjectFilePreview.path)}
+                >
+                  <Download className="mr-2 h-4 w-4" />
+                  Download
+                </Button>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="h-8 w-8"
+                  aria-label="Close file preview"
+                  onClick={() => {
+                    setWorkItemProjectFilePreview(null);
+                    setProjectFilePreviewError('');
+                  }}
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto p-4">
+              {loadingProjectFilePreview ? (
+                <div className="flex min-h-[360px] items-center justify-center text-sm text-muted-foreground">
+                  Loading preview...
+                </div>
+              ) : projectFilePreviewError ? (
+                <div className="flex min-h-[360px] flex-col items-center justify-center gap-3 text-center text-sm text-muted-foreground">
+                  <AlertTriangle className="h-8 w-8 text-destructive" />
+                  <p>{projectFilePreviewError}</p>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => handleDownloadProjectFile(workItemProjectFilePreview.path)}
+                  >
+                    <Download className="mr-2 h-4 w-4" />
+                    Download file
+                  </Button>
+                </div>
+              ) : projectFilePreviewKind(workItemProjectFilePreview) === 'image' && projectFilePreviewUrl ? (
+                <div className="flex min-h-[360px] items-center justify-center">
+                  <img
+                    src={projectFilePreviewUrl}
+                    alt={workItemProjectFilePreview.path}
+                    className="max-h-[70vh] max-w-full rounded-md object-contain"
+                  />
+                </div>
+              ) : projectFilePreviewKind(workItemProjectFilePreview) === 'pdf' && projectFilePreviewUrl ? (
+                <iframe
+                  title={workItemProjectFilePreview.path}
+                  src={projectFilePreviewUrl}
+                  className="h-[70vh] w-full rounded-md border"
+                />
+              ) : projectFilePreviewKind(workItemProjectFilePreview) === 'text' ? (
+                projectFilePreviewText ? (
+                  projectFileTextPreviewMode(workItemProjectFilePreview) === 'markdown' ? (
+                    <div className="max-h-[70vh] overflow-auto rounded-md bg-muted/10 px-4 py-3">
+                      <MathMarkdown content={projectFilePreviewText} className="max-w-none text-sm" />
+                    </div>
+                  ) : (
+                    <pre className="max-h-[70vh] overflow-auto whitespace-pre-wrap rounded-md bg-muted/20 p-3 text-xs leading-5">
+                      {projectFilePreviewText}
+                    </pre>
+                  )
+                ) : (
+                  <div className="flex min-h-[360px] items-center justify-center text-sm text-muted-foreground">
+                    No preview content.
+                  </div>
+                )
+              ) : (
+                <div className="flex min-h-[360px] flex-col items-center justify-center gap-3 text-center text-sm text-muted-foreground">
+                  <FileText className="h-8 w-8 text-primary" />
+                  <p>Preview is not available for this file type.</p>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => handleDownloadProjectFile(workItemProjectFilePreview.path)}
+                  >
+                    <Download className="mr-2 h-4 w-4" />
+                    Download file
+                  </Button>
+                </div>
+              )}
             </div>
           </div>
         </div>

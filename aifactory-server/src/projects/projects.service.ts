@@ -49,6 +49,7 @@ import {
   CreateProjectAssignmentDto,
   CreateProjectDto,
   CreateProjectFromTaskDto,
+  DeleteProjectGoalDto,
   DeleteProjectDto,
   CreateProjectFeatureDto,
   CreateProjectGoalDto,
@@ -111,6 +112,22 @@ type ProjectRoleConfig = {
   initialPrompt?: string;
   scopes?: string[];
   polling?: Partial<AgentRuntimePollingConfig>;
+};
+
+type CoordinatorRuntimeSessionRow = {
+  id: string;
+  userId: string;
+  role: string;
+  provider: string | null;
+  agentType: string | null;
+  status: string | null;
+  runtimeId: string | null;
+  activeRequestId: string | null;
+  activeRequestStartedAt: string | null;
+  activeRequestConversationId: string | null;
+  apiBaseUrl: string | null;
+  grantId: string | null;
+  updatedAt: string | null;
 };
 
 type ProjectWorkItemStatusCategory =
@@ -293,6 +310,7 @@ const LAUNCHABLE_PROJECT_AGENT_ROLES = [
   'REVIEW_AGENT',
   'SECURITY_AUDITOR',
   'PM_AGENT',
+  'AGGREGATOR_AGENT',
   'INTEGRATOR_AGENT',
 ];
 
@@ -380,7 +398,8 @@ export class ProjectsService {
           session.pollingConfig || undefined,
         );
         if (!config.enabled) continue;
-        const state = this.completedPollingState(session, config, session.pollingState || {});
+        const completedState = this.completedPollingState(session, config, session.pollingState || {});
+        const state = this.pollingStateWithEffectiveNextRunAt(config, completedState);
         const nextRunAt = state.nextRunAt ? new Date(state.nextRunAt).getTime() : 0;
         if (nextRunAt && nextRunAt > Date.now()) {
           if (state !== session.pollingState) {
@@ -1290,10 +1309,7 @@ export class ProjectsService {
         ? updates.settings
         : {};
 
-    const merged = {
-      ...base,
-      ...incoming,
-    } as Record<string, any>;
+    const merged = this.mergeProjectSettingsObjects(base, incoming);
 
     if (updates.githubUrl !== undefined) {
       if (updates.githubUrl) {
@@ -1304,6 +1320,33 @@ export class ProjectsService {
     }
 
     return merged;
+  }
+
+  private mergeProjectSettingsObjects(base: Record<string, any>, incoming: Record<string, any>): Record<string, any> {
+    const merged = { ...base } as Record<string, any>;
+    for (const [key, value] of Object.entries(incoming)) {
+      const current = merged[key];
+      if (this.isProjectSettingsObject(current) && this.isProjectSettingsObject(value)) {
+        merged[key] = this.mergeProjectSettingsObjects(current, value);
+      } else {
+        merged[key] = this.cloneProjectSettingsValue(value);
+      }
+    }
+    return merged;
+  }
+
+  private isProjectSettingsObject(value: any): value is Record<string, any> {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  private cloneProjectSettingsValue(value: any): any {
+    if (Array.isArray(value)) {
+      return value.map((entry) => this.cloneProjectSettingsValue(entry));
+    }
+    if (this.isProjectSettingsObject(value)) {
+      return this.mergeProjectSettingsObjects({}, value);
+    }
+    return value;
   }
 
   private async writeProjectSettings(projectId: string, settings: Record<string, any>) {
@@ -1402,48 +1445,94 @@ export class ProjectsService {
     return { activeGoalCount, maxActiveGoals };
   }
 
-  private async activeProjectAgentCount(projectId: string) {
-    const members = await this.prisma.projectMember.findMany({
+  private runtimeSessionIsOffline(session?: AgentRuntimeSession | null) {
+    if (!session) return true;
+    const status = String(session.status || '').toUpperCase();
+    if (!status || status === 'STOPPED' || status === 'ERROR') return true;
+    if ((session as any).dockerStatus?.running === false) return true;
+    if ((session as any).apiHealth?.ok === false) return true;
+    return false;
+  }
+
+  private async projectAgentRuntimeSessionRows(projectId: string, options: { excludeMemberId?: string | null } = {}) {
+    if (typeof (this.prisma as any).$queryRaw !== 'function') {
+      return null;
+    }
+    const agentRoles = [...new Set(['LEAD_AGENT', ...LAUNCHABLE_PROJECT_AGENT_ROLES])];
+    return this.prisma.$queryRaw<CoordinatorRuntimeSessionRow[]>(Prisma.sql`
+      SELECT
+        id,
+        userId,
+        role,
+        JSON_UNQUOTE(JSON_EXTRACT(permissions, '$.runtimeSession.provider')) AS provider,
+        JSON_UNQUOTE(JSON_EXTRACT(permissions, '$.runtimeSession.agentType')) AS agentType,
+        JSON_UNQUOTE(JSON_EXTRACT(permissions, '$.runtimeSession.status')) AS status,
+        JSON_UNQUOTE(JSON_EXTRACT(permissions, '$.runtimeSession.runtimeId')) AS runtimeId,
+        JSON_UNQUOTE(JSON_EXTRACT(permissions, '$.runtimeSession.activeRequestId')) AS activeRequestId,
+        JSON_UNQUOTE(JSON_EXTRACT(permissions, '$.runtimeSession.activeRequestStartedAt')) AS activeRequestStartedAt,
+        JSON_UNQUOTE(JSON_EXTRACT(permissions, '$.runtimeSession.activeRequestConversationId')) AS activeRequestConversationId,
+        JSON_UNQUOTE(JSON_EXTRACT(permissions, '$.runtimeSession.apiBaseUrl')) AS apiBaseUrl,
+        JSON_UNQUOTE(JSON_EXTRACT(permissions, '$.runtimeSession.grantId')) AS grantId,
+        JSON_UNQUOTE(JSON_EXTRACT(permissions, '$.runtimeSession.updatedAt')) AS updatedAt
+      FROM project_members
+      WHERE projectId = ${projectId}
+        AND removedAt IS NULL
+        ${options.excludeMemberId ? Prisma.sql`AND id <> ${options.excludeMemberId}` : Prisma.empty}
+        AND (role REGEXP '_AGENT$' OR role IN (${Prisma.join(agentRoles)}))
+    `);
+  }
+
+  private async activeProjectAgentCount(projectId: string, options: { excludeMemberId?: string | null } = {}) {
+    const runtimeRows = await this.projectAgentRuntimeSessionRows(projectId, options);
+    const members = runtimeRows || await this.prisma.projectMember.findMany({
       where: {
         projectId,
         removedAt: null,
+        ...(options.excludeMemberId ? { id: { not: options.excludeMemberId } } : {}),
         OR: [
-          { user: { role: 'AI_AGENT' as any } },
           { role: { endsWith: '_AGENT' } },
+          { role: { in: LAUNCHABLE_PROJECT_AGENT_ROLES } },
         ],
       },
       select: { id: true, permissions: true },
     });
     const activeFlags = await Promise.all(members.map(async (member) => {
-      const session = this.readRuntimeSession(member.permissions);
+      const session = 'permissions' in member
+        ? this.readRuntimeSession(member.permissions)
+        : this.compactRuntimeSessionFromRow(member as CoordinatorRuntimeSessionRow);
       if (!session) return false;
       if (session.provider === 'local-docker') {
-        const inspected = await this.agentRuntimeLauncher.inspect(session).catch((error: any) =>
-          this.buildUnavailableLocalDockerSession(session, error),
+        const fullMember = 'permissions' in member
+          ? member
+          : await this.prisma.projectMember.findUnique({
+              where: { id: member.id },
+              select: { id: true, permissions: true },
+            });
+        const fullSession = fullMember ? this.readRuntimeSession((fullMember as any).permissions) : null;
+        if (!fullSession) return false;
+        const inspected = await this.agentRuntimeLauncher.inspect(fullSession).catch((error: any) =>
+          this.buildUnavailableLocalDockerSession(fullSession, error),
         );
-        const inspectedStatus = String((inspected as any).status || '').toUpperCase();
-        if ((inspected as any).dockerStatus?.running === false || ['STOPPED', 'ERROR'].includes(inspectedStatus)) {
-          await this.writeRuntimeSession(member.id, inspected as AgentRuntimeSession).catch(() => null);
-          return false;
-        }
-        if (inspected !== session) {
+        if (inspected !== fullSession) {
           await this.writeRuntimeSession(member.id, inspected as AgentRuntimeSession).catch(() => null);
         }
-        const activeStatus = String((inspected as any).status || '').toUpperCase();
-        return Boolean(activeStatus) && activeStatus !== 'STOPPED' && activeStatus !== 'ERROR';
+        return !this.runtimeSessionIsOffline(inspected as AgentRuntimeSession);
       }
-      const status = String(session.status || '').toUpperCase();
-      return Boolean(status) && status !== 'STOPPED' && status !== 'ERROR';
+      return !this.runtimeSessionIsOffline(session);
     }));
     return activeFlags.filter(Boolean).length;
   }
 
-  private async ensureProjectActiveAgentCapacity(projectId: string, settings?: any) {
+  private async ensureProjectActiveAgentCapacity(
+    projectId: string,
+    settings?: any,
+    options: { excludeMemberId?: string | null } = {},
+  ) {
     const maxActiveAgents = this.projectMaxActiveAgentsFromSettings(settings);
-    const activeAgentCount = await this.activeProjectAgentCount(projectId);
+    const activeAgentCount = await this.activeProjectAgentCount(projectId, options);
     if (activeAgentCount >= maxActiveAgents) {
       throw new BadRequestException(
-        `Project active agent limit reached (${activeAgentCount}/${maxActiveAgents}). Dismiss inactive agents to free capacity, or increase Max active agents in Project Settings (maximum ${PROJECT_MAX_ACTIVE_AGENTS_CAP}).`,
+        `Project active agent limit reached (${activeAgentCount}/${maxActiveAgents}). Stop or dismiss a running agent to free capacity, or increase Max active agents in Project Settings (maximum ${PROJECT_MAX_ACTIVE_AGENTS_CAP}).`,
       );
     }
     return { activeAgentCount, maxActiveAgents };
@@ -1467,6 +1556,7 @@ export class ProjectsService {
         'h1_max_parallel_security_auditor_agents',
       ],
       REVIEW_AGENT: ['h1_max_parallel_reviewers', 'h1_max_parallel_review_agents'],
+      AGGREGATOR_AGENT: ['h1_max_parallel_aggregators', 'h1_max_parallel_aggregator_agents'],
       INTEGRATOR_AGENT: ['h1_max_parallel_integrators', 'h1_max_parallel_integrator_agents'],
     };
     return [
@@ -1647,6 +1737,52 @@ export class ProjectsService {
         .map((item) => (typeof item === 'string' ? item.trim() : ''))
         .filter((item) => item.length > 0),
     )];
+  }
+
+  private async workItemDependencyBlockers(
+    projectId: string,
+    item: any,
+    statusFlow: ResolvedProjectWorkItemStatusFlow,
+  ) {
+    const dependencyIds = this.normalizeWorkItemIdList(item?.dependsOn);
+    if (!dependencyIds.length) return [];
+    const rows = await this.prisma.projectWorkItem.findMany({
+      where: { projectId, id: { in: dependencyIds } },
+      select: { id: true, title: true, workType: true, status: true },
+    });
+    const byId = new Map((rows || []).map((row: any) => [row.id, row]));
+    const completed = new Set(statusFlow.completedStatuses.map((status) => this.normalizeWorkItemStatusId(status)));
+    return dependencyIds
+      .map((id) => {
+        const dependency = byId.get(id);
+        if (!dependency) {
+          return { id, title: null, workType: null, status: 'MISSING', missing: true };
+        }
+        const status = this.normalizeWorkItemStatusId(dependency.status);
+        return completed.has(status)
+          ? null
+          : {
+              id: dependency.id,
+              title: dependency.title ?? null,
+              workType: dependency.workType ?? null,
+              status,
+              missing: false,
+            };
+      })
+      .filter(Boolean);
+  }
+
+  private async assertWorkItemDependenciesSatisfied(
+    projectId: string,
+    item: any,
+    statusFlow: ResolvedProjectWorkItemStatusFlow,
+  ) {
+    const blockers = await this.workItemDependencyBlockers(projectId, item, statusFlow);
+    if (!blockers.length) return;
+    const summary = blockers
+      .map((dependency: any) => `${dependency.id}${dependency.status ? `:${dependency.status}` : ''}`)
+      .join(', ');
+    throw new BadRequestException(`Work item has unmet dependencies: ${summary}`);
   }
 
   private normalizeProjectFilePathList(value: unknown) {
@@ -2089,6 +2225,15 @@ export class ProjectsService {
     const normalized = this.normalizeWorkItemStatusId(status);
     if (!normalized) return false;
     return this.resolveProjectWorkItemStatusFlow(settings).terminalStatuses.includes(normalized);
+  }
+
+  private workItemRequiresStructuredReviewDecision(item: any, statusFlow: ResolvedProjectWorkItemStatusFlow) {
+    const itemStatus = this.normalizeWorkItemStatusId(item?.status);
+    if (!itemStatus || !statusFlow.feedbackStatuses.includes(itemStatus)) return false;
+    return statusFlow.dispatchRules.some((rule) =>
+      String(rule.role || '').trim().toUpperCase() === 'REVIEW_AGENT' &&
+      this.workItemMatchesCoordinatorRule(item, rule),
+    );
   }
 
   private async markOpenAssignmentsFailedForTerminalWorkItem(
@@ -2587,6 +2732,29 @@ export class ProjectsService {
     return new Date(from.getTime() + config.intervalMinutes * 60 * 1000).toISOString();
   }
 
+  private effectiveAgentPollingNextRunAt(config: AgentRuntimePollingConfig, state: AgentRuntimePollingState) {
+    const explicitNextRunAt = state.nextRunAt ? new Date(state.nextRunAt).getTime() : 0;
+    if (Number.isFinite(explicitNextRunAt) && explicitNextRunAt > 0) return explicitNextRunAt;
+
+    const lastRunAt = state.lastRunAt ? new Date(state.lastRunAt).getTime() : 0;
+    if (!state.lastConversationId || !Number.isFinite(lastRunAt) || lastRunAt <= 0) return 0;
+    return lastRunAt + config.intervalMinutes * 60 * 1000;
+  }
+
+  private pollingStateWithEffectiveNextRunAt(
+    config: AgentRuntimePollingConfig,
+    state: AgentRuntimePollingState,
+  ): AgentRuntimePollingState {
+    const explicitNextRunAt = state.nextRunAt ? new Date(state.nextRunAt).getTime() : 0;
+    if (Number.isFinite(explicitNextRunAt) && explicitNextRunAt > 0) return state;
+    const effectiveNextRunAt = this.effectiveAgentPollingNextRunAt(config, state);
+    if (!effectiveNextRunAt) return state;
+    return {
+      ...state,
+      nextRunAt: new Date(effectiveNextRunAt).toISOString(),
+    };
+  }
+
   private agentPollingMessage(config: AgentRuntimePollingConfig, options: { reason?: string | null } = {}) {
     const baseMessage = String(config.message || DEFAULT_AGENT_POLLING_CONFIG.message).trim() || DEFAULT_AGENT_POLLING_CONFIG.message;
     const reason = String(options.reason || '').replace(/\s+/g, ' ').trim().slice(0, 500);
@@ -2596,7 +2764,7 @@ export class ProjectsService {
       '',
       `Wake reason: ${reason}`,
       '',
-      'Run a fresh lead polling frontier review. Read coordination/lead.md if present, then coordination/lead-goal-ledger.jsonl, project globals, active goals, linked work item summaries, assignment/runtime state, recent events, targeted shared files, and targeted memory before deciding whether to skip unchanged goals, create missing work/resource/review items, create aggregation/synthesis/delivery work, or mark a goal done. Process only the highest-priority changed goals that fit this tick; append ledger records after inspected goals; update coordination/lead.md before stopping.',
+      'Run a fresh lead polling frontier review. Resume first, read coordination/lead.md and coordination/lead-goal-ledger.jsonl if present, inspect changed or lead-attention active goals with status-filtered goal-scoped work item summaries, and read accepted/closed summaries, exact details, globals, events, shared files, or memory only when they can change a decision. Process only the highest-priority changed goals that fit this tick; append ledger records after inspected goals; update coordination/lead.md before stopping.',
     ].join('\n');
   }
 
@@ -2611,10 +2779,18 @@ export class ProjectsService {
     const lastRunAt = new Date(state.lastRunAt).getTime();
     const lastKnownCompletedAt = state.lastCompletedAt ? new Date(state.lastCompletedAt).getTime() : 0;
     const conversation = session.conversations?.find((item) => item.id === state.lastConversationId);
-    const lastConversationMessageAt = [...(conversation?.messageHistory || [])]
+    const nonUserMessages = (conversation?.messageHistory || []).filter((message) => message.role !== 'user');
+    const hasCompletedResponseMessage = nonUserMessages.some(
+      (message) => String(message.status || '').toUpperCase() !== 'TYPING',
+    );
+    const lastConversationMessageAt = [...nonUserMessages]
       .reverse()
-      .find((message) => message.role !== 'user' && message.createdAt)?.createdAt;
-    const candidates = [lastConversationMessageAt]
+      .find((message) => message.createdAt)?.createdAt;
+    const responseCompletedAt =
+      hasCompletedResponseMessage && session.activeConversationId === state.lastConversationId
+        ? session.lastResponseAt
+        : null;
+    const candidates = [lastConversationMessageAt, responseCompletedAt]
       .map((value) => (value ? new Date(value).getTime() : 0))
       .filter((value) => Number.isFinite(value) && value > lastRunAt);
     const completedAt = candidates.length ? Math.max(...candidates) : 0;
@@ -2953,7 +3129,6 @@ export class ProjectsService {
         permissions: true,
         user: { select: { displayName: true, email: true } },
       },
-      orderBy: { joinedAt: 'asc' },
     });
     return members.find((member) => !this.readRuntimeSession(member.permissions)) || null;
   }
@@ -3634,6 +3809,7 @@ export class ProjectsService {
       REVIEW_AGENT: 'agent-workspace-reviewer',
       SECURITY_AUDITOR: 'agent-workspace-security-auditor',
       PM_AGENT: 'agent-workspace-pm',
+      AGGREGATOR_AGENT: 'agent-workspace-aggregator',
       INTEGRATOR_AGENT: 'agent-workspace-integrator',
     };
     return {
@@ -3819,6 +3995,7 @@ export class ProjectsService {
       REVIEW_AGENT: 'Reviews handoffs against acceptance criteria.',
       SECURITY_AUDITOR: 'Audits implementation work for security risks.',
       PM_AGENT: 'Watches stalls, risks, load, and coordination health.',
+      AGGREGATOR_AGENT: 'Synthesizes accepted upstream work into grounded reports, decision packages, and deliverables.',
       INTEGRATOR_AGENT: 'Connects accepted work to external systems such as GitHub, CI, or release workflows.',
     };
     return descriptions[role] || 'Project agent role.';
@@ -4146,6 +4323,7 @@ export class ProjectsService {
         'PROPOSAL_CREATE',
         'PROJECT_FILE_WRITE',
       ],
+      AGGREGATOR_AGENT: ['PROJECT_BOARD_READ', 'PROJECT_FILE_READ', 'PROJECT_FILE_WRITE', 'MEMORY_WRITE'],
       INTEGRATOR_AGENT: ['PROJECT_BOARD_READ', 'EXTERNAL_EVENT_INGEST', 'PROJECT_FILE_WRITE'],
       LEGAL_CLAUSE_AGENT: [
         'PROJECT_BOARD_READ',
@@ -4210,7 +4388,6 @@ export class ProjectsService {
         permissions: true,
         user: { select: { displayName: true, email: true } },
       },
-      orderBy: { joinedAt: 'asc' },
     });
     return activeLeadAgent;
   }
@@ -4251,7 +4428,7 @@ export class ProjectsService {
     const roleLines = budgetContext
       ? budgetContext.launchableRoles.map(
         (launchRole) =>
-            `- ${launchRole.role}: ${launchRole.description} Capabilities: ${(launchRole.capabilityBundleRefs || launchRole.skillBundleRefs).join(', ')}. Skills: ${launchRole.skillBundleRefs.join(', ')}`,
+            `- ${launchRole.role}: ${launchRole.description}`,
       )
       : [];
     const defaultLaunchMode = this.defaultAgentRuntimeLaunchMode(session);
@@ -4285,7 +4462,7 @@ export class ProjectsService {
       session.runtimeFeatureSupport
         ? `This runtime supports these portable capability surfaces: ${session.runtimeFeatureSupport.supportedFeatures.join(', ') || 'none'}.`
         : '',
-      `Runtime context is mounted at ${runtimeContextPath} and shell/API credentials are provided through environment variables plus ${runtimeEnvPath}.`,
+      `Runtime context is mounted at ${runtimeContextPath} and shell/API credentials are provided through environment variables plus ${runtimeEnvPath}. Do not read the context file for routine startup; source the env file and call runtime.resume first. Open the context file only when you need metadata not already present in this prompt or the resume response.`,
       `Do not read, print, or copy ${runtimeEnvPath}. Source it inside bash commands when shell/API credentials are needed, then use the exported variables.`,
       'API routing rule: runtime resume, inbox/board/work-items, project globals, project files, and project memory are agent-workspace reads/writes. Use $AGENT_WORKSPACE_BASE_URL/v1/... with Authorization: Bearer $AGENT_WORKSPACE_TOKEN for those. Do not call host $AIFACTORY_API_BASE_URL for runtime resume, board, work-items listing, globals, files, or memory.',
       `For project shared files, prefer the mounted project-files.sh helpers at ${runtimeSkillsPath}/agent-workspace/scripts/project-files.sh. If calling HTTP directly, list files with GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/files?prefix=<path>&recursive=true&limit=100; read with /files/read?path=<path>; write with /files/write. There is no /files/list route.`,
@@ -4294,8 +4471,8 @@ export class ProjectsService {
         ? 'This runtime was launched with passwordless sudo enabled. Prefer existing tools, mounted helper scripts, and user-space package managers first; use system package installation only when truly required for the task.'
         : 'Prefer mounted helper scripts, Node.js fetch, or python3 urllib.request for API calls; avoid installing system packages just to make routine HTTP requests.',
       'Lead runtimes may also receive AIFACTORY_API_BASE_URL and AIFACTORY_RUNTIME_TOKEN in the runtime env file. Use host API endpoints only for host-owned runtime helpers such as goal runtime-create/runtime-update, work-item runtime-create/update/runtime-comments, assignment runtime-update/claim/dispatch, runtime launch/dispatch, assignment runtime-state, and failed-runtime workspace recovery. AIFACTORY_API_BASE_URL is a complete API base and may already end with /api; append /projects/... directly and do not add another /api segment. Never call host /projects/... endpoints without Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN, and do not use owner UI routes such as GET /projects/{projectId}/work-items/{workItemId}/comments; runtimes must use GET /projects/{projectId}/work-items/{workItemId}/runtime-comments for work-item comments. Do not call owner-only goal routes such as PATCH /projects/{projectId}/goals/{goalId}, PATCH /goals/{goalId}/status, or guessed goal helper paths; use PATCH /projects/{projectId}/goals/{goalId}/runtime-update for OPEN/IN_PROGRESS/BLOCKED/DONE status updates.',
-      `Project-level resources and saved credentials are owned by agent-workspace, can be listed with GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/globals?includeValues=true using AGENT_WORKSPACE_TOKEN, and may also be exported in ${runtimeEnvPath} as PROJECT_GLOBAL_* variables plus common aliases such as GITHUB_TOKEN when configured.`,
-      'Durable project memory is owned by agent-workspace. Search it with GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/memories?q=... and write reusable DECISION/CONSTRAINT/FACT/RISK/OPEN_QUESTION/INTERFACE_CONTRACT entries with POST $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/memories when your runtime has MEMORY_WRITE.',
+      `Project-level resources and saved credentials are owned by agent-workspace. For routine checks, list configured keys with GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/globals using AGENT_WORKSPACE_TOKEN; request includeValues=true only when the actual value is required for the current authorized decision, and never print or copy secret values. Globals may also be exported in ${runtimeEnvPath} as PROJECT_GLOBAL_* variables plus common aliases such as GITHUB_TOKEN when configured.`,
+      'Durable project memory is owned by agent-workspace. Search it only with targeted queries such as GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/memories?q=... when reusable decisions, constraints, facts, risks, open questions, or interface contracts can change the current decision. Write reusable entries with POST /memories when your runtime has MEMORY_WRITE.',
       'When requesting owner-controlled resources, do not infer a vendor, website, social network, API provider, platform-specific key set, or platform-specific skill from a generic resource key or generic task. Keep labels and descriptions neutral unless the owner explicitly named that platform.',
       isLocalCodexRuntime
         ? `Use ${runtimeWorkspaceDir} as the default persistent local workspace. Do not create or use /opt/data or /opt/data/workspace; those are container-only paths for Docker/cloud runtimes.`
@@ -4326,24 +4503,22 @@ export class ProjectsService {
             ...roleLines,
             '[Lead operating loop]',
             `1. On a fresh lead pass, or when current board context is missing or stale, source ${runtimeEnvPath}; call POST $AGENT_WORKSPACE_BASE_URL/v1/runtimes/$AGENT_WORKSPACE_RUNTIME_ID/resume with Authorization: Bearer $AGENT_WORKSPACE_TOKEN and JSON {"projectId":"$AGENT_WORKSPACE_PROJECT_ID"}; then read board/work items/members from the resume boardSnapshot or GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/board. Do not use AIFACTORY_API_BASE_URL for resume or board reads.`,
-            'When the project has many goals or work items, avoid one huge all-items pass. Page through goals with GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/goals?includeClosed=false&limit=100, then for each active goal read only its linked work items with GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/work-items?goalId=<goalId>&includeClosed=true&limit=100&page=1. Read full item details lazily with GET /v1/projects/$AGENT_WORKSPACE_PROJECT_ID/work-items/{workItemId} only for the small set you may accept, revise, duplicate-check, or use to create the next item.',
-            'Maintain a durable lead workspace and lead goal ledger in project shared storage. Use coordination/lead.md for the human-readable frontier policy, polling cursor, next-goal queue, unresolved blockers, and project-level decisions. Use coordination/lead-goal-ledger.jsonl for per-goal machine checkpoints. At the start of a polling run, read lead.md if present, then read the ledger if present. For each goal you inspect, compute a small status digest from goal id/status/updatedAt plus linked work-item ids/statuses/workTypes and open assignment statuses; after deciding, append or rewrite one JSON record with pollingRunId, timestamp, goalId, topology, statusDigest, decision, nextAction, and any createdWorkItemIds. On later polling runs, skip a goal only when its latest ledger digest matches the current digest and there is no READY/NEEDS_REVISION/IN_REVIEW/ownerAction/resourceRequest work that needs lead attention. Write the ledger after each goal, and before stopping update coordination/lead.md with lastRunId, nextGoalCursor, unfinishedScanReason, skipped reasons, next-goal queue, unresolved blockers, and project-level decisions so a stopped runtime can resume without restarting the whole pass.',
-            'For every active goal, classify the completion topology before expanding work: DIRECT, SERIAL, FAN_OUT_FAN_IN, TOTAL_TO_PARTS, TOTAL_PARTS_TOTAL, or ITERATIVE_REVIEW. Use linked item summaries first, then read exact item details, shared files, and targeted memory only when they can change the decision. If accepted upstream work is sufficient and no aggregation deliverable is required, mark the goal DONE when no linked non-terminal work remains. If accepted upstream work is sufficient but the goal requires aggregation, create one aggregation/synthesis/delivery item that depends on accepted upstream items; require review when the acceptance bar or status flow requires it; mark DONE only after the accepted items or accepted aggregation artifact satisfy the goal acceptance bar and no linked non-terminal work remains.',
+            'Use boardSnapshot as an attention slice. Page active goals with GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/goals?statuses=IN_PROGRESS,BLOCKED&includeClosed=false&limit=100 only when managing all goals, polling, status counts exceed the visible slice, or a goal-completion decision requires it. For each inspected goal, first read lead-attention work item summaries with GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/work-items?goalId=<goalId>&statuses=READY,NEEDS_REVISION,IN_REVIEW,ASSIGNED,IN_PROGRESS,REPORT_READY,REJECTED&limit=100&page=1; read ACCEPTED summaries with statuses=ACCEPTED only when checking sufficiency, dependencies, or aggregation, and use includeClosed=true only for duplicate/cancellation/history audits. Read full item details lazily with GET /v1/projects/$AGENT_WORKSPACE_PROJECT_ID/work-items/{workItemId} only for items you may accept, revise, duplicate-check, dispatch, use as dependencies, or use to decide goal completion.',
+            'On polling/frontier passes, maintain coordination/lead.md and coordination/lead-goal-ledger.jsonl in project shared storage. Read them at the start if present, inspect only changed or lead-attention goals that fit the tick budget, write one compact ledger record with statusDigest after each inspected goal, and update lead.md before stopping with cursor, skipped reasons, next-goal queue, blockers, and durable decisions.',
+            'For every inspected active goal, classify the completion topology: DIRECT, SERIAL, FAN_OUT_FAN_IN, TOTAL_TO_PARTS, TOTAL_PARTS_TOTAL, or ITERATIVE_REVIEW. Use summaries first; read exact item details, shared files, globals, events, and targeted memory only when they can change the decision. Mark DONE only after accepted items or an accepted aggregation artifact satisfy the goal acceptance bar and no linked non-terminal work remains.',
             '2. When the owner explicitly asks you to create a goal, use the host runtime helper POST $AIFACTORY_API_BASE_URL/projects/$AGENT_WORKSPACE_PROJECT_ID/goals/runtime-create with Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN and JSON {"title":"...","description":"..."}. To update a goal after accepted evidence/audit/report work, use PATCH $AIFACTORY_API_BASE_URL/projects/$AGENT_WORKSPACE_PROJECT_ID/goals/{goalId}/runtime-update with Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN and fields such as {"status":"IN_PROGRESS"} or {"status":"DONE"}. Runtime goal updates cannot cancel goals; create an owner action if cancellation is needed. Never mark DONE or create an owner goal-closure action while the same goal still has READY, ASSIGNED, IN_PROGRESS, IN_REVIEW, NEEDS_REVISION, or REPORT_READY security/planning/audit/report work; finish, accept, or cancel the linked work first. Do not call the user-JWT /goals endpoint with a runtime token, and do not guess /goals/{goalId}/status.',
             '3. If no item is ready, create or refine a dispatchable work item with scopeBrief, acceptanceCriteria, inputPacket, outputContract, dependencies, and any uploaded project file references in inputPacket.projectFiles. For new dispatchable work items, use the host runtime helper POST $AIFACTORY_API_BASE_URL/projects/$AGENT_WORKSPACE_PROJECT_ID/work-items/runtime-create with Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN so coordinator scheduling is triggered. acceptanceCriteria must be a single string; use newline-delimited numbered criteria instead of an array. outputContract must be a JSON object, never a plain string.',
             '4. If project settings show workItemStatusFlow.coordinator.enabled is not false, treat the COORDINATOR as the primary dispatcher: create or refine the smallest READY/NEEDS_REVISION work item with the correct workType, dependencies, and outputContract, then give the coordinator a chance to launch/assign the matching role. Use runtime-dispatch from the lead role as a fallback when coordinator dispatch is disabled, unavailable, stale, blocked by a failed assignment that you have reconciled, or has not produced an assignment and the project needs a new agent to keep moving.',
             '5. If a ready item needs execution with no suitable active worker runtime and lead fallback dispatch is warranted, prefer local-docker/local-runner WORKER_AGENT in local AgentCraft; use paid AWS cloud WORKER_AGENT for 1 day only when available runtime budget covers the daily commitment.',
-            `6. Lead dispatch fallback: if AIFACTORY_API_BASE_URL and AIFACTORY_RUNTIME_TOKEN are present, launch and dispatch through POST $AIFACTORY_API_BASE_URL/projects/{projectId}/work-items/{workItemId}/assignments/runtime-dispatch with Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN. Use AIFACTORY_API_BASE_URL exactly as provided; do not prepend /api if it already ends with /api. Use JSON fields role, launchIfMissing, launchMode, objective, contextPacket, and forceLaunchNew when you need one fresh worker per parallel task; omit agentType unless the owner explicitly requested a different runtime; the host will use the role/template launch default first and only fall back to the platform sub-agent default when no role default exists. The host will use owner-visible model API configs, first trying the current/owner-preferred config and then fallbacks; if all model APIs fail, it creates an owner work item. Default launchMode for this lead runtime is ${this.displayLaunchMode(defaultLaunchMode)}; fallback default agentType is ${defaultAgentType}. local-runner is for production/operator Docker hosts such as agentcraft.work, local-agent is for a registered local CLI worker on the owner's machine, local-docker is for backend-local Docker, aws-agentcore/aws-ecs are paid cloud modes. Non-Hermes agent types must use local-docker, local-runner, or local-agent.`,
-            'For HackerOne target work, use one fresh worker runtime per independent program/goal so prior target context cannot contaminate the next target. Use forceLaunchNew: true for independent target items. Only set contextPacket.sameGoalContinuation: true or contextPacket.allowWorkerReuse: true for a bounded revision or continuation on the same target/goal.',
-            'Capacity rule: if runtime-dispatch returns a project active-agent capacity error, do not call a non-existent /agent-runtimes/{memberId}/stop endpoint. Reuse a suitable IDLE worker without forceLaunchNew only for non-HackerOne work or an explicit same-goal continuation; for HackerOne independent target worker items, wait for fresh-agent capacity or create/use an owner capacity/settings item. SECURITY_AUDITOR/REVIEW_AGENT feedback work may reuse same-role IDLE runtimes because the auditor must re-read the current handoff and evidence. STOPPED and ERROR runtime sessions do not count as active capacity.',
+            `6. Lead dispatch fallback: if AIFACTORY_API_BASE_URL and AIFACTORY_RUNTIME_TOKEN are present, launch and dispatch through POST $AIFACTORY_API_BASE_URL/projects/{projectId}/work-items/{workItemId}/assignments/runtime-dispatch with Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN. Use JSON fields role, launchIfMissing, launchMode, objective, contextPacket, and forceLaunchNew; omit agentType unless the owner explicitly requested a different runtime. Default launchMode for this lead runtime is ${this.displayLaunchMode(defaultLaunchMode)}; fallback default agentType is ${defaultAgentType}. Use AIFACTORY_API_BASE_URL exactly as provided and do not add another /api segment.`,
+            'Capacity rule: if runtime-dispatch returns a project active-agent capacity error, do not call a non-existent /agent-runtimes/{memberId}/stop endpoint. Reuse a suitable IDLE runtime only when the work item is safe to continue on that runtime; otherwise wait for capacity or create an owner capacity/settings item. STOPPED and ERROR sessions are not active capacity.',
             'Dispatch timeout rule: if runtime-dispatch times out, disconnects, or returns an unreadable response, do not immediately retry with forceLaunchNew. First inspect assignments/runtime-state and the exact work item; if any open or recently completed assignment already exists for the same workItemId and role, treat dispatch as pending or idempotently successful, poll/wake that assignment, and create a separate work item only when you truly need another parallel agent.',
             'Before runtime-dispatch, re-read the exact work item by id and verify it belongs to this project, is still READY, and is not CANCELLED, REJECTED, ACCEPTED, or superseded by a newer duplicate. For every host or workspace URL, copy projectId, goalId, workItemId, and assignmentId exactly from the latest API object fields; never type ids from memory, truncate ids, invent UUID segments, or infer ids from titles. Do not reuse ids from failed response parsing or items you just cancelled. Parse dispatch responses from assignment.id, assignment.status, assignment.assigneeUser, launchedRuntime, and idempotent; do not assume top-level assignmentId/runtimeId/status.',
             '7. In manual dispatch fallback, dispatch the item to the chosen worker with launchIfMissing: true and a scoped task packet. The packet must include objective, workItem id/title, scopeBrief, acceptanceCriteria, inputPacket, outputContract, dependencies, projectFiles/read hints when files are referenced, and expected handoff. Never include actual credential, token, cookie, authorization header, API key, or account identifier values in contextPacket; include only resource keys/env var names and tell the assignee to read saved globals or runtime env. Automated agent work items should be unowned until dispatched; set ownerId only for human owner resource, approval, or decision items. Do not create a WORKER_AGENT assignment to the lead member or owner account itself for automated work.',
-            'For HackerOne target goals, do not pre-create broad target-account/API-token resource requests just because a goal may eventually need authenticated testing. First create a narrow unauthenticated/passive Phase 1 SECURITY_TEST worker item for resource inventory and hypothesis confirmation, then leave it for the COORDINATOR unless the coordinator is disabled. Create owner resource-request work items only after a worker handoff names stable minimum keys, or when the program policy makes even Phase 1 impossible without that resource.',
             'For owner-visible confirmations, approvals, or external manual steps that are not secret values, create an owner action item instead of a fake resource: workType INTEGRATION, status READY, current goalId, high priority, and inputPacket.ownerAction with stable key, label, type, category, required, and prompt. Use resourceRequest only for values that must become project globals.',
             'Do not create ordinary INTEGRATION items for status reports, progress summaries, or FYI updates. Put status/progress summaries in runtime comments, project files, or the assignment handoff; create an ownerAction item only when the owner must approve, confirm, or perform a concrete external step.',
             '8. After manual dispatch, tell the worker to start from the assignment inbox/task packet, read referenced projectFiles before analysis, and create a run before substantive work.',
-            '9. To audit assignment health, use GET $AIFACTORY_API_BASE_URL/projects/{projectId}/assignments/runtime-state?limit=100 with Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN. It returns a JSON object with assignments (and data as a compatibility alias); read the assignments array. Each row includes assignment status, linked work item status, assignee runtime availability, health.stale/staleReasons, and public workspace recovery endpoints without secrets. Assignment statuses are PROPOSED/ACTIVE/PAUSED/COMPLETED/FAILED; work-item statuses are READY/ASSIGNED/IN_PROGRESS/IN_REVIEW/ACCEPTED/CANCELLED/etc. Treat open assignments (PROPOSED/ACTIVE/PAUSED) whose assigneeRuntime.available is false, whose health.stale is true, or whose linked work item is CANCELLED/ACCEPTED/REJECTED as stale. Before any new dispatch, make the open-stale set zero: mark each stale assignment failed through PATCH $AIFACTORY_API_BASE_URL/projects/{projectId}/work-items/{workItemId}/assignments/{assignmentId}/runtime-update with {"status":"FAILED","contextPacket":{"staleDispatch":{"reason":"..."}}}. If a stale PATCH fails, create an owner-visible coordination blocker and do not dispatch more work until the stale assignment is resolved. Retry with runtime-dispatch or create a focused revision item only when the linked work item still needs work.',
+            '9. To audit assignment health, use GET $AIFACTORY_API_BASE_URL/projects/{projectId}/assignments/runtime-state?limit=100 with Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN. Read the assignments array. Treat open assignments whose assignee runtime is unavailable, health.stale is true, or linked work item is CANCELLED/ACCEPTED/REJECTED as stale. Before new manual dispatch, resolve stale open assignments through the assignment runtime-update helper or create an owner-visible coordination blocker.',
             '10. If an assignment fails or times out, inspect runtime-state failureContext.localRunnerFailure or the assignment contextPacket.localRunnerFailure. When it includes runtime.memberId or workspaceListEndpoint, use GET $AIFACTORY_API_BASE_URL/public/projects/{projectId}/agent-runtimes/{memberId}/workspace?maxDepth=4 and /workspace/download?path=... with Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN to recover useful local files, copy sanitized deliverables into project shared storage, then create a focused revision item instead of discarding the work.',
             'If available runtime budget is below the required AWS cloud launch cost, do not launch a paid cloud runtime; use local runner if available, create a proposal, or ask the owner to increase the project runtime budget.',
           ]
@@ -5749,7 +5924,12 @@ export class ProjectsService {
         category: entry.category || null,
       }));
     const effectiveGlobals = [...templateGlobals, ...requestedGlobals];
-    const storedSettings = this.mergeProjectSettings(template.settings || {}, {
+    const templateBaseSettings = this.mergeProjectSettings(template.settings || {}, {
+      settings: template.workItemStatusFlow
+        ? { workItemStatusFlow: template.workItemStatusFlow }
+        : undefined,
+    });
+    const storedSettings = this.mergeProjectSettings(templateBaseSettings, {
       githubUrl: dto.githubUrl,
       settings: dto.settings,
     });
@@ -8624,11 +8804,72 @@ export class ProjectsService {
   private workItemMatchesCoordinatorRule(item: any, rule: ProjectCoordinatorDispatchRule) {
     const status = this.normalizeWorkItemStatusId(item?.status);
     const workType = String(item?.workType || '').trim().toUpperCase();
-    if (rule.statuses.length && !rule.statuses.includes(status)) return false;
+    if (!this.workItemMatchesCoordinatorRuleEnvelope(item, rule, status)) return false;
     if (rule.workTypes.length && !rule.workTypes.includes(workType)) return false;
+    return true;
+  }
+
+  private workItemMatchesCoordinatorRuleEnvelope(
+    item: any,
+    rule: ProjectCoordinatorDispatchRule,
+    normalizedStatus = this.normalizeWorkItemStatusId(item?.status),
+  ) {
+    if (rule.statuses.length && !rule.statuses.includes(normalizedStatus)) return false;
     const ownerRole = String(item?.owner?.role || '').trim().toUpperCase();
     if (item?.ownerId && ownerRole !== 'AI_AGENT' && !rule.allowOwnerOwned) return false;
     return true;
+  }
+
+  private objectRecord(value: unknown): Record<string, any> | null {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    return value as Record<string, any>;
+  }
+
+  private workItemHasAggregationShape(item: any) {
+    const workType = String(item?.workType || '').trim().toUpperCase();
+    if (['AGGREGATION', 'SYNTHESIS', 'REPORT', 'DELIVERY', 'DECISION_PACKAGE'].includes(workType)) return true;
+
+    const inputPacket = this.objectRecord(item?.inputPacket);
+    const outputContract = this.objectRecord(item?.outputContract);
+    const goalTopology = this.objectRecord(inputPacket?.goalTopology);
+    const workSlice = inputPacket?.workSlice;
+    const acceptedUpstreamItems = Array.isArray(inputPacket?.acceptedUpstreamItems)
+      ? inputPacket.acceptedUpstreamItems
+      : [];
+    const dependencyIds = Array.isArray(item?.dependsOn) ? item.dependsOn.filter(Boolean) : [];
+    const hasUpstream = dependencyIds.length > 0 || acceptedUpstreamItems.length > 0;
+    if (!hasUpstream) return false;
+
+    const outputType = String(outputContract?.type || '').trim().toUpperCase();
+    const sliceText = typeof workSlice === 'string'
+      ? workSlice
+      : this.objectRecord(workSlice)
+        ? JSON.stringify(workSlice)
+        : '';
+    const topologyMode = String(goalTopology?.mode || '').trim().toUpperCase();
+    const titleText = [
+      item?.title,
+      item?.scopeBrief,
+      item?.description,
+    ].filter(Boolean).join(' ');
+    const aggregationPattern = /AGGREGAT|SYNTHES|DELIVERY|DECISION|REPORT|FAN[_ -]?IN|汇总|综合|合成|总结|报告|交付|决策/i;
+
+    if (aggregationPattern.test(outputType)) return true;
+    if (aggregationPattern.test(sliceText)) return true;
+    if (acceptedUpstreamItems.length > 0 && goalTopology?.needsAggregation === true) return true;
+    if (['FAN_OUT_FAN_IN', 'TOTAL_PARTS_TOTAL'].includes(topologyMode) && aggregationPattern.test(titleText)) return true;
+    return dependencyIds.length > 1 && aggregationPattern.test(titleText);
+  }
+
+  private coordinatorRuleForWorkItem(item: any, rules: ProjectCoordinatorDispatchRule[]) {
+    if (this.workItemHasAggregationShape(item)) {
+      const aggregationRule = rules.find((rule) =>
+        rule.role === 'AGGREGATOR_AGENT' &&
+        this.workItemMatchesCoordinatorRuleEnvelope(item, rule),
+      );
+      if (aggregationRule) return aggregationRule;
+    }
+    return rules.find((candidateRule) => this.workItemMatchesCoordinatorRule(item, candidateRule)) || null;
   }
 
   private coordinatorOwnerOnlySkipReason(item: any) {
@@ -8724,12 +8965,69 @@ export class ProjectsService {
     return `当前有未被分配的 item ${item.title || item.id}，通过 ${this.displayLaunchTarget(launchMode, agentType)} 拉起角色 ${role}。`;
   }
 
+  private nullableRuntimeJsonString(value: unknown) {
+    if (value === null || value === undefined) return null;
+    const text = String(value);
+    return text && text !== 'null' ? text : null;
+  }
+
+  private compactRuntimeSessionFromRow(row: CoordinatorRuntimeSessionRow): AgentRuntimeSession | null {
+    const provider = this.nullableRuntimeJsonString(row.provider) as AgentRuntimeLaunchMode | null;
+    const runtimeId = this.nullableRuntimeJsonString(row.runtimeId);
+    const status = this.nullableRuntimeJsonString(row.status);
+    if (!provider || !runtimeId || !status) return null;
+    return {
+      provider,
+      runtimeId,
+      status,
+      role: row.role,
+      agentType: this.nullableRuntimeJsonString(row.agentType),
+      activeRequestId: this.nullableRuntimeJsonString(row.activeRequestId),
+      activeRequestStartedAt: this.nullableRuntimeJsonString(row.activeRequestStartedAt),
+      activeRequestConversationId: this.nullableRuntimeJsonString(row.activeRequestConversationId),
+      apiBaseUrl: this.nullableRuntimeJsonString(row.apiBaseUrl) || '',
+      grantId: this.nullableRuntimeJsonString(row.grantId) || '',
+      image: '',
+      containerName: '',
+      apiKey: '',
+      dataDir: '',
+      workspaceToken: '',
+      scopes: [],
+      skillBundleRefs: [],
+      launchedAt: '',
+      updatedAt: this.nullableRuntimeJsonString(row.updatedAt) || new Date().toISOString(),
+    };
+  }
+
+  private async coordinatorRuntimeSessionRows(projectId: string, role: string) {
+    if (typeof (this.prisma as any).$queryRaw !== 'function') {
+      return null;
+    }
+    return this.prisma.$queryRaw<CoordinatorRuntimeSessionRow[]>(Prisma.sql`
+      SELECT
+        id,
+        userId,
+        role,
+        JSON_UNQUOTE(JSON_EXTRACT(permissions, '$.runtimeSession.provider')) AS provider,
+        JSON_UNQUOTE(JSON_EXTRACT(permissions, '$.runtimeSession.agentType')) AS agentType,
+        JSON_UNQUOTE(JSON_EXTRACT(permissions, '$.runtimeSession.status')) AS status,
+        JSON_UNQUOTE(JSON_EXTRACT(permissions, '$.runtimeSession.runtimeId')) AS runtimeId,
+        JSON_UNQUOTE(JSON_EXTRACT(permissions, '$.runtimeSession.activeRequestId')) AS activeRequestId,
+        JSON_UNQUOTE(JSON_EXTRACT(permissions, '$.runtimeSession.activeRequestStartedAt')) AS activeRequestStartedAt,
+        JSON_UNQUOTE(JSON_EXTRACT(permissions, '$.runtimeSession.activeRequestConversationId')) AS activeRequestConversationId,
+        JSON_UNQUOTE(JSON_EXTRACT(permissions, '$.runtimeSession.apiBaseUrl')) AS apiBaseUrl,
+        JSON_UNQUOTE(JSON_EXTRACT(permissions, '$.runtimeSession.grantId')) AS grantId,
+        JSON_UNQUOTE(JSON_EXTRACT(permissions, '$.runtimeSession.updatedAt')) AS updatedAt
+      FROM project_members
+      WHERE projectId = ${projectId}
+        AND role = ${role}
+        AND removedAt IS NULL
+    `);
+  }
+
   private async activeCoordinatorRoleCount(projectId: string, role: string, settings?: any) {
-    const [members, assignments] = await Promise.all([
-      this.prisma.projectMember.findMany({
-        where: { projectId, role, removedAt: null },
-        select: { id: true, userId: true, permissions: true },
-      }),
+    const [runtimeRows, assignments] = await Promise.all([
+      this.coordinatorRuntimeSessionRows(projectId, role),
       this.prisma.projectAssignment.findMany({
         where: {
           projectId,
@@ -8739,15 +9037,22 @@ export class ProjectsService {
         select: { assigneeUserId: true, workItem: { select: { status: true } } },
       }),
     ]);
+    const members = runtimeRows || await this.prisma.projectMember.findMany({
+      where: { projectId, role, removedAt: null },
+      select: { id: true, userId: true, permissions: true },
+    });
     const activeRuntimeUserIds = new Set<string>();
     let anonymousActiveRuntimeCount = 0;
     members.forEach((member) => {
-      const session =
-        member.permissions &&
-        typeof member.permissions === 'object' &&
-        !Array.isArray(member.permissions)
-          ? (member.permissions as any).runtimeSession
-          : null;
+      const session = 'permissions' in member
+        ? (
+            member.permissions &&
+            typeof member.permissions === 'object' &&
+            !Array.isArray(member.permissions)
+              ? (member.permissions as any).runtimeSession
+              : null
+          )
+        : this.compactRuntimeSessionFromRow(member as CoordinatorRuntimeSessionRow);
       const status = typeof session?.status === 'string' ? String(session.status).toUpperCase() : '';
       if (!session || (!status && !session.activeRequestId)) return;
       if (!session.activeRequestId && ['STOPPED', 'ERROR', 'IDLE', 'READY'].includes(status)) return;
@@ -8787,24 +9092,36 @@ export class ProjectsService {
 
   private async findIdleCoordinatorRuntime(projectId: string, role: string, preferredAgentType?: string | null, settings?: any) {
     const preferred = String(preferredAgentType || '').trim();
-    const members = await this.prisma.projectMember.findMany({
+    const runtimeRows = await this.coordinatorRuntimeSessionRows(projectId, role);
+    const members = runtimeRows || await this.prisma.projectMember.findMany({
       where: { projectId, role, removedAt: null },
       select: { id: true, userId: true, role: true, permissions: true },
     });
     const candidates = (
       await Promise.all(members.map(async (member) => {
-        const rawSession = this.readRuntimeSession(member.permissions);
+        const hasFullPermissions = 'permissions' in member;
+        const rawSession = hasFullPermissions
+          ? this.readRuntimeSession(member.permissions)
+          : this.compactRuntimeSessionFromRow(member as CoordinatorRuntimeSessionRow);
         let session = rawSession ? this.recoverPersistedRuntimeSession(rawSession) : null;
         if (!session) return null;
-        if (rawSession !== session) {
+        if (hasFullPermissions && rawSession !== session) {
           await this.writeRuntimeSession(member.id, session).catch(() => null);
         }
         if (!this.isIdleCoordinatorRuntimeSession(session)) return null;
         const sessionAgentType = String(session.agentType || '').trim();
         if (preferred && sessionAgentType && sessionAgentType !== preferred) return null;
         if (session.provider === 'local-docker') {
-          const inspectedSession = await this.agentRuntimeLauncher.inspect(session).catch((error: any) =>
-            this.buildUnavailableLocalDockerSession(session as AgentRuntimeSession, error),
+          const fullMember = hasFullPermissions
+            ? member
+            : await this.prisma.projectMember.findUnique({
+                where: { id: member.id },
+                select: { id: true, userId: true, role: true, permissions: true },
+              });
+          const fullSession = fullMember ? this.readRuntimeSession(fullMember.permissions) : null;
+          if (!fullSession) return null;
+          const inspectedSession = await this.agentRuntimeLauncher.inspect(fullSession).catch((error: any) =>
+            this.buildUnavailableLocalDockerSession(fullSession as AgentRuntimeSession, error),
           );
           const recoveredSession = this.recoverPersistedRuntimeSession(inspectedSession as AgentRuntimeSession);
           await this.writeRuntimeSession(member.id, recoveredSession).catch(() => null);
@@ -9148,9 +9465,22 @@ export class ProjectsService {
         skipped.push({ workItemId: item.id, reason: 'GOAL_ALREADY_HAS_ACTIVE_WORK' });
         continue;
       }
-      const rule = configuredRules.find((candidateRule) => this.workItemMatchesCoordinatorRule(item, candidateRule));
+      const rule = this.coordinatorRuleForWorkItem(item, configuredRules);
       if (!rule) {
         skipped.push({ workItemId: item.id, reason: 'NO_MATCHING_RULE' });
+        continue;
+      }
+      const dependencyBlockers = await this.workItemDependencyBlockers(projectId, item, statusFlow);
+      if (dependencyBlockers.length) {
+        await logBlocked(
+          `item ${item.title || item.id} has unmet dependencies and cannot be dispatched yet.`,
+          {
+            reason: 'DEPENDENCIES_UNMET',
+            role: rule.role,
+            dependencyBlockers,
+          },
+          item,
+        );
         continue;
       }
       const missingRequiredGlobals = this.missingRequiredProjectGlobalsForWorkItem(item, projectGlobals);
@@ -9513,6 +9843,10 @@ export class ProjectsService {
     const member = dto.memberId
       ? await this.ensureLaunchableMember(projectId, dto.memberId, role)
       : existingLeadAgentMember || pendingLaunchMember || (await this.findOrCreateAgentMember(projectId, role));
+    const existingMemberSession = this.readRuntimeSession(member.permissions);
+    if (this.runtimeSessionIsOffline(existingMemberSession)) {
+      await this.ensureProjectActiveAgentCapacity(projectId, projectRecord?.settings, { excludeMemberId: member.id });
+    }
     const explicitLauncherMember = dto.launcherMemberId
       ? await this.prisma.projectMember.findFirst({
           where: { id: dto.launcherMemberId, projectId, removedAt: null },
@@ -11612,14 +11946,14 @@ export class ProjectsService {
     };
 
     const features = await tx.projectFeature.findMany({
-      where: { projectId, goalId, status: { notIn: statusFlow.terminalStatuses as any } },
+      where: { projectId, goalId, status: { notIn: ['DONE', 'CANCELLED'] as any } },
       select: { id: true },
     });
     affected.features = features.map((feature: any) => feature.id);
     if (affected.features.length) {
       await tx.projectFeature.updateMany({
         where: { id: { in: affected.features } },
-        data: { status: statusFlow.closedStatus },
+        data: { status: 'DONE' },
       });
     }
 
@@ -12128,6 +12462,7 @@ export class ProjectsService {
     if (runtime.role !== 'LEAD_AGENT') {
       throw new ForbiddenException('Only a LEAD_AGENT runtime can dispatch project work');
     }
+    const statusFlow = this.resolveProjectWorkItemStatusFlow(managerProject.settings);
 
     const role = String(dto.role || 'WORKER_AGENT').trim();
     const requestedForceLaunchNew = dto.forceLaunchNew === true;
@@ -12136,15 +12471,16 @@ export class ProjectsService {
     if ((this.prisma as any).projectWorkItem?.findFirst) {
       const workItem = await this.prisma.projectWorkItem.findFirst({
         where: { id: workItemId, projectId },
-        select: { id: true, status: true },
+        select: { id: true, title: true, status: true, dependsOn: true },
       });
       if (!workItem) {
         throw new NotFoundException('Project work item not found');
       }
-        if (this.isTerminalWorkItemStatus(workItem.status, managerProject.settings)) {
-          await this.markOpenAssignmentsFailedForTerminalWorkItem(projectId, workItemId, role);
-          throw new BadRequestException(`Cannot dispatch ${role} to terminal work item ${workItem.status}`);
-        }
+      if (this.isTerminalWorkItemStatus(workItem.status, managerProject.settings)) {
+        await this.markOpenAssignmentsFailedForTerminalWorkItem(projectId, workItemId, role);
+        throw new BadRequestException(`Cannot dispatch ${role} to terminal work item ${workItem.status}`);
+      }
+      await this.assertWorkItemDependenciesSatisfied(projectId, workItem, statusFlow);
     }
     const existingAssignment = await this.prisma.projectAssignment.findFirst({
       where: {
@@ -12304,21 +12640,7 @@ export class ProjectsService {
     if (workItem.assignments.length) {
       throw new BadRequestException('Work item already has an open assignment');
     }
-    const dependencyIds = Array.isArray(workItem.dependsOn)
-      ? workItem.dependsOn.filter((dependencyId): dependencyId is string => typeof dependencyId === 'string')
-      : [];
-    if (dependencyIds.length) {
-      const blockedDependencyCount = await this.prisma.projectWorkItem.count({
-        where: {
-          projectId,
-          id: { in: dependencyIds },
-          status: { notIn: statusFlow.completedStatuses as any },
-        },
-      });
-      if (blockedDependencyCount) {
-        throw new BadRequestException('Work item has unmet dependencies');
-      }
-    }
+    await this.assertWorkItemDependenciesSatisfied(projectId, workItem, statusFlow);
 
     const contextPacket = await this.buildAssignmentContextPacket(projectId, workItemId, {
       assigneeUserId: runtime.userId,
@@ -12394,6 +12716,24 @@ export class ProjectsService {
       typeof coordinatorPacket.message === 'string' && coordinatorPacket.message.trim()
         ? coordinatorPacket.message.trim()
         : '';
+    const isReviewAssignment = String(assignment.role || '').toUpperCase() === 'REVIEW_AGENT';
+    const completionInstructions = isReviewAssignment
+      ? [
+          'After verifying the handoff and evidence, submit a structured review before marking the assignment COMPLETED:',
+          `POST $AGENT_WORKSPACE_BASE_URL/v1/projects/${projectId}/reviews`,
+          'with Authorization: Bearer $AGENT_WORKSPACE_TOKEN and JSON {"assignmentId":"<assignmentId>","decision":"APPROVED|REQUEST_CHANGES|REJECTED","summary":"<specific review summary>","details":{"checks":[]}}.',
+          `Use assignmentId "${assignment.id}". Include artifactId only when you have an actual artifact id, not a project file path.`,
+          'Do not rely on a runtime comment or final chat text as the review decision. The assignment COMPLETED update is rejected until a structured review exists for this assignment.',
+          '',
+          'After the structured review API returns a review id, update the assignment status to COMPLETED using:',
+          `PATCH $AIFACTORY_API_BASE_URL/projects/${projectId}/work-items/${assignment.workItemId}/assignments/${assignment.id}/runtime-update`,
+          'with Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN and body {"status":"COMPLETED"}.',
+        ].join('\n')
+      : [
+          'After submitting artifacts and handoff, update the same runtime endpoint with {"status":"COMPLETED"} so the work item moves to IN_REVIEW.',
+          `Before marking COMPLETED, make the handoff durable: POST $AIFACTORY_API_BASE_URL/projects/${projectId}/work-items/${assignment.workItemId}/runtime-comments with Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN and JSON {"content":"<handoff markdown>"} unless you submitted an equivalent handoff artifact. Final chat text alone is not a durable handoff.`,
+          'Keep this turn bounded: for research or validation work, use command-level network timeouts for external calls, deliver the smallest reviewable phase before the turn becomes too large or silent, write required evidence or notes to project shared files with project-file-write/project-file-upload, verify the shared path, then mark COMPLETED and leave follow-up hypotheses in the handoff or a new work item.',
+        ].join('\n');
     const message = [
       coordinatorMessage ? `Coordinator message: ${coordinatorMessage}` : null,
       coordinatorMessage ? '' : null,
@@ -12410,9 +12750,7 @@ export class ProjectsService {
       `PATCH $AIFACTORY_API_BASE_URL/projects/${projectId}/work-items/${assignment.workItemId}/assignments/${assignment.id}/runtime-update`,
       'with Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN and body {"status":"ACTIVE"}.',
       '',
-      'After submitting artifacts and handoff, update the same runtime endpoint with {"status":"COMPLETED"} so the work item moves to IN_REVIEW.',
-      `Before marking COMPLETED, make the handoff durable: POST $AIFACTORY_API_BASE_URL/projects/${projectId}/work-items/${assignment.workItemId}/runtime-comments with Authorization: Bearer $AIFACTORY_RUNTIME_TOKEN and JSON {"content":"<handoff markdown>"} unless you submitted an equivalent handoff artifact. Final chat text alone is not a durable handoff.`,
-      'Keep this turn bounded: for research or validation work, use command-level network timeouts for external calls, deliver the smallest reviewable phase before the turn becomes too large or silent, write required evidence or notes to project shared files with project-file-write/project-file-upload, verify the shared path, then mark COMPLETED and leave follow-up hypotheses in the handoff or a new work item.',
+      completionInstructions,
       Array.isArray((packet as any).outputProjectFiles) && (packet as any).outputProjectFiles.length
         ? [
             '',
@@ -12496,6 +12834,44 @@ export class ProjectsService {
     const runtime = await this.authenticateProjectRuntimeToken(projectId, rawToken);
     if (!allowedScopes.some((scope) => runtime.scopes.includes(scope))) {
       throw new ForbiddenException(`Runtime token is missing one of required scopes: ${allowedScopes.join(', ')}`);
+    }
+    if (statusOnly && nextStatus) {
+      const reviewDecisionByStatus: Record<string, string> = {
+        [this.normalizeWorkItemStatusId(statusFlow.reviewApprovedStatus)]: 'APPROVED',
+        [this.normalizeWorkItemStatusId(statusFlow.reviewChangesRequestedStatus)]: 'CHANGES_REQUESTED',
+        [this.normalizeWorkItemStatusId(statusFlow.reviewRejectedStatus)]: 'REJECTED',
+      };
+      const requiredReviewStatus = reviewDecisionByStatus[nextStatus];
+      if (requiredReviewStatus) {
+        const [reviewAssignmentCount, existingWorkItem, matchingReviewCount] = await Promise.all([
+          this.prisma.projectAssignment.count({
+            where: {
+              projectId,
+              workItemId,
+              role: 'REVIEW_AGENT',
+            },
+          }),
+          (this.prisma.projectWorkItem as any)?.findFirst
+            ? this.prisma.projectWorkItem.findFirst({
+                where: { id: workItemId, projectId },
+                select: { id: true, title: true, workType: true, status: true },
+              })
+            : Promise.resolve(null),
+          this.prisma.projectReview.count({
+            where: {
+              projectId,
+              workItemId,
+              status: requiredReviewStatus as any,
+            },
+          }),
+        ]);
+        const reviewRequiredByTemplate = this.workItemRequiresStructuredReviewDecision(existingWorkItem, statusFlow);
+        if ((reviewAssignmentCount > 0 || reviewRequiredByTemplate) && matchingReviewCount === 0) {
+          throw new BadRequestException(
+            `Work item ${workItemId} requires a structured ${requiredReviewStatus} review before runtime status ${nextStatus}. Submit POST $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/reviews before changing the item status.`,
+          );
+        }
+      }
     }
     const updated = await this.agentWorkspaceClient.updateWorkItem(projectId, workItemId, dto, rawToken);
     return updated.workItem;
@@ -12584,6 +12960,24 @@ export class ProjectsService {
     const leadMarkingStaleFailed = runtime.role === 'LEAD_AGENT' && status === 'FAILED';
     if (assignment.assigneeUserId !== runtime.userId && !leadMarkingStaleFailed) {
       throw new ForbiddenException('Runtime can only update its own assignment');
+    }
+    if (
+      status === 'COMPLETED' &&
+      String(runtime.role || '').toUpperCase() === 'REVIEW_AGENT'
+    ) {
+      const structuredReviewCount = await this.prisma.projectReview.count({
+        where: {
+          projectId,
+          workItemId,
+          assignmentId,
+          status: { in: ['APPROVED', 'CHANGES_REQUESTED', 'REJECTED'] as any },
+        },
+      });
+      if (structuredReviewCount === 0) {
+        throw new BadRequestException(
+          'Review assignments must submit a structured review decision before completion. POST $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/reviews with assignmentId and decision APPROVED, REQUEST_CHANGES, or REJECTED, then retry assignment completion.',
+        );
+      }
     }
 
     const updated = await this.updateAssignment(projectId, workItemId, assignmentId, runtime.userId, {
@@ -13721,7 +14115,10 @@ export class ProjectsService {
         await this.agentRuntimeLauncher.inspect(inspected).catch(() => inspected),
       );
     }
-    const currentState = this.completedPollingState(inspected, config, inspected.pollingState || {});
+    const completedState = this.completedPollingState(inspected, config, inspected.pollingState || {});
+    const currentState = options.force
+      ? completedState
+      : this.pollingStateWithEffectiveNextRunAt(config, completedState);
     const now = new Date();
     const nextRunAt = currentState.nextRunAt ? new Date(currentState.nextRunAt).getTime() : 0;
     if (!options.force && nextRunAt && nextRunAt > now.getTime()) {
@@ -13816,7 +14213,7 @@ export class ProjectsService {
       ...currentState,
       lastRunAt: now.toISOString(),
       lastCompletedAt: null,
-      nextRunAt: null,
+      nextRunAt: config.enabled ? this.nextAgentPollingRunAt(config, now) : null,
       lastError: null,
     };
     await this.writeRuntimeSession(member.id, {
@@ -15729,6 +16126,100 @@ export class ProjectsService {
     return result;
   }
 
+  async deleteGoal(
+    projectId: string,
+    goalId: string,
+    userId: string,
+    dto: DeleteProjectGoalDto,
+  ) {
+    const confirmation = String(dto.confirmation || '').trim();
+    if (confirmation !== 'delete') {
+      throw new BadRequestException('Type delete to confirm goal deletion');
+    }
+
+    const project = await this.ensureProjectManager(projectId, userId);
+    await this.ensureProjectScopedReference(projectId, 'goal', goalId);
+    const statusFlow = this.resolveProjectWorkItemStatusFlow(project.settings);
+    const existingSettings =
+      project.settings && typeof project.settings === 'object' && !Array.isArray(project.settings)
+        ? project.settings as Record<string, any>
+        : {};
+    const existingGlobals: ProjectGlobalVariable[] = await this.resolveProjectGlobalVariables(projectId, existingSettings)
+      .catch((): ProjectGlobalVariable[] => []);
+    const nextGlobals = existingGlobals.filter(
+      (global) => !(this.isGoalScopedGlobal(global) && global.goalId === goalId),
+    );
+    const nextSettings: Record<string, any> = {
+      ...existingSettings,
+      projectGlobals: this.globalsForStoredSettings(nextGlobals),
+    };
+    if (!nextGlobals.length) {
+      delete nextSettings.projectGlobals;
+    }
+
+    const cascade = dto.cascade !== false;
+    const result = await this.prisma.$transaction(async (tx) => {
+      const goal = await tx.projectGoal.findFirst({
+        where: { id: goalId, projectId },
+      });
+      if (!goal) throw new NotFoundException('Project goal not found');
+
+      const affected = cascade
+        ? await this.cascadeTerminalGoalWork(tx, projectId, goalId, statusFlow)
+        : { features: [], workItems: [], assignments: [], runs: [] };
+
+      const detachedFeatures = await tx.projectFeature.updateMany({
+        where: { projectId, goalId },
+        data: { goalId: null },
+      });
+      const detachedWorkItems = await tx.projectWorkItem.updateMany({
+        where: { projectId, goalId },
+        data: { goalId: null },
+      });
+      await tx.project.update({
+        where: { id: projectId },
+        data: { settings: nextSettings },
+      });
+      await tx.projectGoal.delete({
+        where: { id: goalId },
+      });
+
+      return {
+        goal,
+        affected,
+        detached: {
+          features: detachedFeatures.count,
+          workItems: detachedWorkItems.count,
+        },
+      };
+    });
+
+    await this.agentWorkspaceClient.updateProject(projectId, { settings: nextSettings }).catch(() => null);
+    await this.syncProjectGlobalResourceTasks(projectId, project.ownerId, nextGlobals).catch(() => null);
+    await this.agentWorkspaceClient.recordProjectEvent(projectId, {
+      type: 'GOAL_DELETED',
+      refType: 'GOAL',
+      refId: goalId,
+      actorUserId: userId,
+      payload: {
+        goalId,
+        goalTitle: result.goal.title,
+        cascade,
+        affected: result.affected,
+        detached: result.detached,
+      },
+    }).catch((error: any) => {
+      this.logger.warn(`Failed to record goal delete event for ${projectId}/${goalId}: ${error?.message || error}`);
+    });
+
+    return {
+      deleted: true,
+      goal: result.goal,
+      affected: result.affected,
+      detached: result.detached,
+    };
+  }
+
   async reopenGoal(projectId: string, goalId: string, userId: string) {
     // NOTE: per SPEC this always routes through a ProjectProposal owned by the
     // project Owner. The Proposal engine lands in M2; for now we explicitly
@@ -17120,13 +17611,18 @@ export class ProjectsService {
           status: planningStatus,
           scopeBrief: [
             `Analyze goal ${goal.title || goal.id}.`,
-            'Create the smallest next dispatchable work item needed to move this goal forward.',
-          ].join('\n'),
+            'Create the smallest sufficient dispatchable work item set needed to move this goal forward.',
+            'If the goal refers to previous/prior results, list project goals, inspect the relevant prior goal, list its child work items, and read accepted item output paths before decomposing.',
+            'When discovered outputs include both source reports and downstream verification/synthesis/audit reports, use the source report as the decomposition source and treat downstream reports as background unless the current goal explicitly asks to audit or continue existing verification.',
+          ].filter(Boolean).join('\n'),
           acceptanceCriteria: [
-            '1. Read the linked goal and any referenced project files.',
-            '2. Decide the smallest next work item needed for this goal.',
-            '3. Create that linked work item through the runtime work-items/create helper with the correct workType, role-facing packet, and output contract.',
-            '4. Do not dispatch the work yourself; leave the created item READY for the coordinator.',
+            '1. Read the linked goal. If it refers to previous/prior results, reports, or outputs, discover the source through workspace reads: GET $AGENT_WORKSPACE_BASE_URL/v1/projects/$AGENT_WORKSPACE_PROJECT_ID/goals?includeClosed=true&limit=100, then GET /v1/projects/$AGENT_WORKSPACE_PROJECT_ID/goals/{goalId}, then GET /v1/projects/$AGENT_WORKSPACE_PROJECT_ID/work-items?goalId={goalId}&statuses=ACCEPTED&includeClosed=true&limit=100.',
+            '2. Inspect candidate source work item details with GET /v1/projects/$AGENT_WORKSPACE_PROJECT_ID/work-items/{workItemId}; collect output paths from outputContract.sharedFiles, inputPacket.outputProjectFiles, inputPacket.projectFiles, inputPacket.sharedFiles, and inputPacket.acceptedUpstreamItems output paths.',
+            '3. Classify discovered files into sourceArtifacts and downstreamArtifacts. Prefer sourceArtifacts whose goal/title/path matches the current goal subject and whose file enumerates rows/categories/opportunities. Treat verification/synthesis/audit reports as downstream context unless the current goal explicitly asks to audit, review, or continue existing verification.',
+            '4. Read the relevant sourceArtifacts first. When the goal asks to split, verify, validate, or cover many source rows/categories/opportunities, default to one verification item per source entry/opportunity plus a dependent aggregation/synthesis item. Do not collapse the plan to a single audit item or broad category batches merely because downstream verification reports already exist.',
+            '5. Create the linked work item(s) through the runtime work-items/create helper with the correct workType, role-facing packet, dependencies, output project files, and output contract.',
+            '6. For every item derived from an enumerated source report, include source goal/item/file path and exact source row/category/opportunity references in inputPacket.sourceRows, inputPacket.sourceCategories, or inputPacket.sourceOpportunities. Batches of more than 3 source entries are not acceptable unless the owner explicitly asked for batching; any batch must include inputPacket.batchJustification.',
+            '7. Do not dispatch the work yourself; leave created worker/aggregation items READY for the coordinator.',
           ].join('\n'),
           inputPacket: {
             source: 'project-coordinator',
@@ -17137,6 +17633,26 @@ export class ProjectsService {
               title: goal.title,
               status: goal.status,
               description: goal.description,
+            },
+            discoveryInstructions: {
+              source: 'goal-analysis',
+              when: 'Use when the goal mentions previous/prior/upstream/existing results, reports, outputs, or artifacts.',
+              goalListEndpoint: '/v1/projects/{projectId}/goals?includeClosed=true&limit=100',
+              goalWorkItemsEndpoint: '/v1/projects/{projectId}/work-items?goalId={goalId}&statuses=ACCEPTED&includeClosed=true&limit=100',
+              workItemDetailEndpoint: '/v1/projects/{projectId}/work-items/{workItemId}',
+              outputPathFields: [
+                'outputContract.sharedFiles',
+                'inputPacket.outputProjectFiles',
+                'inputPacket.projectFiles',
+                'inputPacket.sharedFiles',
+                'inputPacket.acceptedUpstreamItems.outputPaths',
+              ],
+              artifactSelection: {
+                sourceArtifactRule: 'Prefer files and goals whose title/path matches the current goal subject and whose content enumerates source rows, categories, opportunities, assets, bugs, hypotheses, or sources.',
+                downstreamArtifactRule: 'Treat verification, synthesis, summary, and audit reports as downstream/background context unless the current goal explicitly asks to audit, review, or continue existing verification.',
+                coverageRule: 'If the goal asks to split, verify, validate, or cover many source entries, create coverage-preserving verification items and a dependent aggregation/synthesis item instead of a single audit-only item.',
+                granularityRule: 'For enumerated verification/validation goals, default to one work item per source row/opportunity. Batches may include at most 3 source entries unless the owner explicitly asked for batching, and each batch must include batchJustification plus exact sourceOpportunities/sourceRows.',
+              },
             },
           },
           outputContract: {
@@ -17362,7 +17878,7 @@ export class ProjectsService {
       ...(inspected.pollingState || {}),
       lastRunAt: now.toISOString(),
       lastCompletedAt: null,
-      nextRunAt: null,
+      nextRunAt: config.enabled ? this.nextAgentPollingRunAt(config, now) : null,
       lastError: null,
     };
     await this.writeRuntimeSession(member.id, {

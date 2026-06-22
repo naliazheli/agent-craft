@@ -74,8 +74,8 @@ describe('ProjectsService project names', () => {
     expect(prompt).toContain('treat the COORDINATOR as the primary dispatcher');
     expect(prompt).toContain('Use runtime-dispatch from the lead role as a fallback');
     expect(prompt).toContain('Lead dispatch fallback');
-    expect(prompt).toContain('/goals?includeClosed=false&limit=100');
-    expect(prompt).toContain('/work-items?goalId=<goalId>&includeClosed=true&limit=100&page=1');
+    expect(prompt).toContain('/goals?statuses=IN_PROGRESS,BLOCKED&includeClosed=false&limit=100');
+    expect(prompt).toContain('/work-items?goalId=<goalId>&statuses=READY,NEEDS_REVISION,IN_REVIEW,ASSIGNED,IN_PROGRESS,REPORT_READY,REJECTED&limit=100&page=1');
     expect(prompt).toContain('/work-items/{workItemId}');
     expect(prompt).toContain('copy projectId, goalId, workItemId, and assignmentId exactly');
     expect(prompt).toContain('coordination/lead-goal-ledger.jsonl');
@@ -99,6 +99,302 @@ describe('ProjectsService project names', () => {
     expect(
       (service as any).coordinatorDispatchMessage(item, 'WORKER_AGENT', 'local-codex', 'pi', null),
     ).toBe('当前有未被分配的 item Map internet rewards，通过 local-agent/pi 拉起角色 WORKER_AGENT。');
+  });
+
+  it('routes aggregation-shaped fan-in items to the aggregator even when the workType is too generic', () => {
+    const rules = [
+      {
+        statuses: ['READY', 'NEEDS_REVISION'],
+        workTypes: ['VERIFICATION'],
+        role: 'WORKER_AGENT',
+        launchMode: null,
+        agentType: null,
+        maxAgents: null,
+        minAgents: null,
+        forceLaunchNew: false,
+        allowOwnerOwned: false,
+        allowRepeatCompleted: false,
+        objective: null,
+        message: null,
+      },
+      {
+        statuses: ['READY', 'NEEDS_REVISION'],
+        workTypes: ['AGGREGATION', 'SYNTHESIS', 'REPORT', 'DELIVERY', 'DECISION_PACKAGE'],
+        role: 'AGGREGATOR_AGENT',
+        launchMode: null,
+        agentType: null,
+        maxAgents: null,
+        minAgents: null,
+        forceLaunchNew: false,
+        allowOwnerOwned: false,
+        allowRepeatCompleted: false,
+        objective: null,
+        message: null,
+      },
+    ];
+    const item = {
+      id: 'agg-1',
+      title: '综合验证报告',
+      workType: 'VERIFICATION',
+      status: 'READY',
+      dependsOn: ['part-a', 'part-b'],
+      inputPacket: {
+        goalTopology: { mode: 'FAN_OUT_FAN_IN', needsAggregation: true },
+        acceptedUpstreamItems: [{ workItemId: 'part-a', outputPaths: ['reports/a.md'] }],
+      },
+      outputContract: { type: 'aggregation-output', sharedFiles: ['reports/final.md'] },
+    };
+
+    expect((service as any).coordinatorRuleForWorkItem(item, rules)).toEqual(expect.objectContaining({
+      role: 'AGGREGATOR_AGENT',
+    }));
+  });
+
+  it('keeps ordinary topology lane items on their matching worker rule', () => {
+    const rules = [
+      {
+        statuses: ['READY', 'NEEDS_REVISION'],
+        workTypes: ['VERIFICATION'],
+        role: 'WORKER_AGENT',
+        launchMode: null,
+        agentType: null,
+        maxAgents: null,
+        minAgents: null,
+        forceLaunchNew: false,
+        allowOwnerOwned: false,
+        allowRepeatCompleted: false,
+        objective: null,
+        message: null,
+      },
+      {
+        statuses: ['READY', 'NEEDS_REVISION'],
+        workTypes: ['AGGREGATION', 'SYNTHESIS'],
+        role: 'AGGREGATOR_AGENT',
+        launchMode: null,
+        agentType: null,
+        maxAgents: null,
+        minAgents: null,
+        forceLaunchNew: false,
+        allowOwnerOwned: false,
+        allowRepeatCompleted: false,
+        objective: null,
+        message: null,
+      },
+    ];
+    const item = {
+      id: 'part-a',
+      title: '验证: 阅读奖励自动化可行性',
+      workType: 'VERIFICATION',
+      status: 'READY',
+      dependsOn: [],
+      inputPacket: {
+        goalTopology: { mode: 'FAN_OUT_FAN_IN', needsAggregation: true },
+        workSlice: { lane: 'reading-rewards' },
+      },
+      outputContract: { sharedFiles: ['reports/reading.md'] },
+    };
+
+    expect((service as any).coordinatorRuleForWorkItem(item, rules)).toEqual(expect.objectContaining({
+      role: 'WORKER_AGENT',
+    }));
+  });
+
+  it('deep merges partial project settings without dropping template dispatch rules', () => {
+    const merged = (service as any).mergeProjectSettings(
+      {
+        workItemStatusFlow: {
+          statuses: [{ id: 'READY', label: 'Ready' }],
+          dispatchRules: [
+            {
+              statuses: ['READY'],
+              workTypes: ['PLANNING'],
+              role: 'PLANNER_AGENT',
+              launchMode: 'local-docker',
+              agentType: 'pi',
+            },
+          ],
+          coordinator: {
+            enabled: true,
+            maxDispatchesPerTick: 3,
+            launchMode: 'local-docker',
+            agentType: 'pi',
+          },
+        },
+        projectRoleAgentDefaults: {
+          LEAD_AGENT: { role: 'LEAD_AGENT', launchMode: 'local-docker', agentType: 'codex' },
+          PLANNER_AGENT: { role: 'PLANNER_AGENT', launchMode: 'local-docker', agentType: 'pi' },
+        },
+      },
+      {
+        settings: {
+          workItemStatusFlow: {
+            coordinator: {
+              launchMode: 'local-codex',
+              agentType: 'pi',
+            },
+          },
+          projectRoleAgentDefaults: {
+            LEAD_AGENT: { agentType: 'pi' },
+          },
+        },
+      },
+    );
+
+    expect(merged.workItemStatusFlow.statuses).toEqual([{ id: 'READY', label: 'Ready' }]);
+    expect(merged.workItemStatusFlow.dispatchRules).toHaveLength(1);
+    expect(merged.workItemStatusFlow.dispatchRules[0]).toEqual(expect.objectContaining({
+      workTypes: ['PLANNING'],
+      role: 'PLANNER_AGENT',
+    }));
+    expect(merged.workItemStatusFlow.coordinator).toEqual(expect.objectContaining({
+      enabled: true,
+      maxDispatchesPerTick: 3,
+      launchMode: 'local-codex',
+      agentType: 'pi',
+    }));
+    expect(merged.projectRoleAgentDefaults.LEAD_AGENT).toEqual(expect.objectContaining({
+      role: 'LEAD_AGENT',
+      launchMode: 'local-docker',
+      agentType: 'pi',
+    }));
+    expect(merged.projectRoleAgentDefaults.PLANNER_AGENT).toEqual(expect.objectContaining({
+      role: 'PLANNER_AGENT',
+      launchMode: 'local-docker',
+      agentType: 'pi',
+    }));
+  });
+
+  it('creates projects by merging top-level template status flow with partial settings overrides', async () => {
+    const prisma = {
+      project: {
+        update: jest.fn().mockResolvedValue({}),
+      },
+    };
+    const agentWorkspaceClient = {
+      createProject: jest.fn().mockResolvedValue({ projectId: 'project-1' }),
+      updateProject: jest.fn().mockResolvedValue({}),
+    };
+    const projectTemplatesService = {
+      getTemplate: jest.fn().mockResolvedValue({
+        id: 'default',
+        label: 'Default',
+        roles: [],
+        projectGlobals: [],
+        projectFileFolders: [],
+        settings: {
+          maxActiveAgents: 4,
+        },
+        workItemStatusFlow: {
+          dispatchRules: [
+            {
+              statuses: ['READY'],
+              workTypes: ['PLANNING'],
+              role: 'PLANNER_AGENT',
+            },
+          ],
+          coordinator: {
+            enabled: true,
+            launchMode: 'local-docker',
+            agentType: 'pi',
+            maxDispatchesPerTick: 3,
+          },
+        },
+      }),
+    };
+    const createService = new ProjectsService(
+      prisma as never,
+      agentWorkspaceClient as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { get: () => undefined } as never,
+      projectTemplatesService as never,
+    ) as any;
+    createService.materializePersonalTemplateSkillFiles = jest.fn().mockResolvedValue(undefined);
+    createService.syncProjectCapabilityBundles = jest.fn().mockResolvedValue(undefined);
+    createService.ensureTemplateProjectFileFolders = jest.fn().mockResolvedValue(undefined);
+    createService.ensureProjectLeadWorkspaceFile = jest.fn().mockResolvedValue(undefined);
+    createService.ensureTemplateAutoMembers = jest.fn().mockResolvedValue(undefined);
+    createService.launchTemplateAutoRuntimes = jest.fn().mockResolvedValue(undefined);
+    createService.getProject = jest.fn().mockResolvedValue({ id: 'project-1' });
+
+    await createService.createProject('owner-1', {
+      name: 'Internet trash picking',
+      settings: {
+        workItemStatusFlow: {
+          coordinator: {
+            launchMode: 'local-codex',
+            maxDispatchesPerTick: 2,
+          },
+        },
+      },
+    });
+
+    const settings = agentWorkspaceClient.createProject.mock.calls[0][0].settings;
+    expect(settings.workItemStatusFlow.dispatchRules).toHaveLength(1);
+    expect(settings.workItemStatusFlow.dispatchRules[0]).toEqual(expect.objectContaining({
+      workTypes: ['PLANNING'],
+      role: 'PLANNER_AGENT',
+    }));
+    expect(settings.workItemStatusFlow.coordinator).toEqual(expect.objectContaining({
+      enabled: true,
+      launchMode: 'local-codex',
+      agentType: 'pi',
+      maxDispatchesPerTick: 2,
+    }));
+    expect(prisma.project.update).toHaveBeenCalledWith({
+      where: { id: 'project-1' },
+      data: {
+        settings: expect.objectContaining({
+          workItemStatusFlow: expect.objectContaining({
+            dispatchRules: expect.any(Array),
+          }),
+        }),
+      },
+    });
+  });
+
+  it('blocks lead runtime dispatch when work item dependencies are not complete', async () => {
+    const prisma = {
+      projectWorkItem: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'agg-1',
+          title: 'Synthesize parts',
+          status: 'READY',
+          dependsOn: ['part-a'],
+        }),
+        findMany: jest.fn().mockResolvedValue([
+          { id: 'part-a', title: 'Part A', workType: 'RESEARCH', status: 'IN_PROGRESS' },
+        ]),
+      },
+      projectAssignment: {
+        findFirst: jest.fn(),
+      },
+    };
+    const runtimeService = new ProjectsService(
+      prisma as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { get: () => undefined } as never,
+      {} as never,
+    ) as any;
+    runtimeService.authenticateProjectRuntimeToken = jest.fn().mockResolvedValue({
+      role: 'LEAD_AGENT',
+      userId: 'lead-user',
+    });
+    runtimeService.ensureProjectManager = jest.fn().mockResolvedValue({
+      ownerId: 'owner-user',
+      settings: {},
+    });
+
+    await expect(
+      runtimeService.dispatchWorkItemFromRuntime('project-1', 'agg-1', 'runtime-token', {
+        role: 'AGGREGATOR_AGENT',
+      }),
+    ).rejects.toThrow('Work item has unmet dependencies: part-a:IN_PROGRESS');
+    expect(prisma.projectAssignment.findFirst).not.toHaveBeenCalled();
   });
 
   it('initializes the lead workspace file without relying on chat history', async () => {
@@ -875,7 +1171,7 @@ describe('ProjectsService project names', () => {
     expect(goal).toEqual({ id: 'goal-1', title: 'Completed goal', status: 'DONE' });
     expect(tx.projectFeature.updateMany).toHaveBeenCalledWith({
       where: { id: { in: ['feature-1'] } },
-      data: { status: 'REJECTED' },
+      data: { status: 'DONE' },
     });
     expect(tx.projectWorkItem.updateMany).toHaveBeenCalledWith({
       where: { id: { in: ['work-1', 'work-2'] } },
@@ -1005,6 +1301,217 @@ describe('ProjectsService project names', () => {
       'runtime-completed assignment assignment-1',
     );
     expect(updated).toEqual({ id: 'assignment-1', status: 'COMPLETED' });
+  });
+
+  it('rejects reviewer assignment completion until a structured review exists', async () => {
+    const prisma = {
+      projectReview: {
+        count: jest.fn().mockResolvedValue(0),
+      },
+    };
+    const runtimeService = new ProjectsService(
+      prisma as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { get: () => undefined } as never,
+      {} as never,
+    ) as any;
+    runtimeService.authenticateProjectRuntimeToken = jest.fn().mockResolvedValue({
+      role: 'REVIEW_AGENT',
+      userId: 'reviewer-user',
+    });
+    runtimeService.ensureProjectAssignment = jest.fn().mockResolvedValue({
+      id: 'review-assignment-1',
+      assigneeUserId: 'reviewer-user',
+      role: 'REVIEW_AGENT',
+    });
+    runtimeService.updateAssignment = jest.fn();
+    runtimeService.scheduleLeadPollingWake = jest.fn();
+
+    await expect(
+      runtimeService.updateAssignmentFromRuntime(
+        'project-1',
+        'work-1',
+        'review-assignment-1',
+        'runtime-token',
+        { status: 'COMPLETED' },
+      ),
+    ).rejects.toThrow('structured review decision');
+
+    expect(prisma.projectReview.count).toHaveBeenCalledWith({
+      where: {
+        projectId: 'project-1',
+        workItemId: 'work-1',
+        assignmentId: 'review-assignment-1',
+        status: { in: ['APPROVED', 'CHANGES_REQUESTED', 'REJECTED'] },
+      },
+    });
+    expect(runtimeService.updateAssignment).not.toHaveBeenCalled();
+    expect(runtimeService.scheduleLeadPollingWake).not.toHaveBeenCalled();
+  });
+
+  it('includes structured review submission instructions when waking reviewer assignments', async () => {
+    const runtimeService = new ProjectsService(
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { get: () => undefined } as never,
+      {} as never,
+    ) as any;
+    runtimeService.waitForRuntimeMessageEndpoint = jest.fn().mockResolvedValue(undefined);
+    runtimeService.sendAgentRuntimeMessage = jest.fn().mockResolvedValue({
+      session: {
+        activeRequestId: 'request-1',
+        activeRequestConversationId: 'conversation-1',
+      },
+    });
+
+    await runtimeService.wakeRuntimeForAssignment('project-1', 'owner-user', 'review-member-1', {
+      id: 'review-assignment-1',
+      workItemId: 'work-1',
+      role: 'REVIEW_AGENT',
+      objective: 'Review the handoff',
+      contextPacket: {
+        workItem: {
+          id: 'work-1',
+          title: 'Review target',
+        },
+      },
+    });
+
+    const message = runtimeService.sendAgentRuntimeMessage.mock.calls[0][3].message;
+    expect(message).toContain('submit a structured review before marking the assignment COMPLETED');
+    expect(message).toContain('POST $AGENT_WORKSPACE_BASE_URL/v1/projects/project-1/reviews');
+    expect(message).toContain('"assignmentId":"<assignmentId>"');
+    expect(message).toContain('Use assignmentId "review-assignment-1"');
+    expect(message).toContain('runtime comment or final chat text');
+    expect(message).not.toContain('so the work item moves to IN_REVIEW');
+  });
+
+  it('blocks runtime direct acceptance of review-gated work without a structured review', async () => {
+    const prisma = {
+      project: {
+        findUnique: jest.fn().mockResolvedValue({ settings: {} }),
+      },
+      projectAssignment: {
+        count: jest.fn().mockResolvedValue(1),
+      },
+      projectReview: {
+        count: jest.fn().mockResolvedValue(0),
+      },
+    };
+    const agentWorkspaceClient = {
+      updateWorkItem: jest.fn(),
+    };
+    const runtimeService = new ProjectsService(
+      prisma as never,
+      agentWorkspaceClient as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { get: () => undefined } as never,
+      {} as never,
+    ) as any;
+    runtimeService.authenticateProjectRuntimeToken = jest.fn().mockResolvedValue({
+      role: 'LEAD_AGENT',
+      userId: 'lead-user',
+      scopes: ['WORK_ITEM_STATUS_UPDATE'],
+    });
+
+    await expect(
+      runtimeService.updateWorkItemFromRuntime('project-1', 'work-1', 'runtime-token', {
+        status: 'ACCEPTED',
+      }),
+    ).rejects.toThrow('requires a structured APPROVED review');
+
+    expect(prisma.projectAssignment.count).toHaveBeenCalledWith({
+      where: {
+        projectId: 'project-1',
+        workItemId: 'work-1',
+        role: 'REVIEW_AGENT',
+      },
+    });
+    expect(prisma.projectReview.count).toHaveBeenCalledWith({
+      where: {
+        projectId: 'project-1',
+        workItemId: 'work-1',
+        status: 'APPROVED',
+      },
+    });
+    expect(agentWorkspaceClient.updateWorkItem).not.toHaveBeenCalled();
+  });
+
+  it('blocks runtime direct acceptance when template review routing applies before reviewer assignment exists', async () => {
+    const prisma = {
+      project: {
+        findUnique: jest.fn().mockResolvedValue({
+          settings: {
+            workItemStatusFlow: {
+              dispatchRules: [
+                {
+                  statuses: ['IN_REVIEW'],
+                  role: 'REVIEW_AGENT',
+                },
+              ],
+            },
+          },
+        }),
+      },
+      projectAssignment: {
+        count: jest.fn().mockResolvedValue(0),
+      },
+      projectReview: {
+        count: jest.fn().mockResolvedValue(0),
+      },
+      projectWorkItem: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'work-1',
+          title: 'Review routed work',
+          workType: 'RESEARCH',
+          status: 'IN_REVIEW',
+        }),
+      },
+    };
+    const agentWorkspaceClient = {
+      updateWorkItem: jest.fn(),
+    };
+    const runtimeService = new ProjectsService(
+      prisma as never,
+      agentWorkspaceClient as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { get: () => undefined } as never,
+      {} as never,
+    ) as any;
+    runtimeService.authenticateProjectRuntimeToken = jest.fn().mockResolvedValue({
+      role: 'LEAD_AGENT',
+      userId: 'lead-user',
+      scopes: ['WORK_ITEM_STATUS_UPDATE'],
+    });
+
+    await expect(
+      runtimeService.updateWorkItemFromRuntime('project-1', 'work-1', 'runtime-token', {
+        status: 'ACCEPTED',
+      }),
+    ).rejects.toThrow('requires a structured APPROVED review');
+
+    expect(prisma.projectWorkItem.findFirst).toHaveBeenCalledWith({
+      where: { id: 'work-1', projectId: 'project-1' },
+      select: { id: true, title: true, workType: true, status: true },
+    });
+    expect(prisma.projectReview.count).toHaveBeenCalledWith({
+      where: {
+        projectId: 'project-1',
+        workItemId: 'work-1',
+        status: 'APPROVED',
+      },
+    });
+    expect(agentWorkspaceClient.updateWorkItem).not.toHaveBeenCalled();
   });
 
   it('runtime-launched sub agents default to pi and owner-visible model configs', async () => {
@@ -4822,6 +5329,112 @@ describe('ProjectsService project names', () => {
     }));
   });
 
+  it('coordinator-created planner items instruct planners to discover prior goal outputs without pre-filling them', async () => {
+    const settings = {
+      workItemStatusFlow: {
+        initialStatus: 'READY',
+        dispatchRules: [
+          {
+            statuses: ['READY'],
+            workTypes: ['PLANNING'],
+            role: 'PLANNER_AGENT',
+            launchMode: 'local-docker',
+            agentType: 'pi',
+          },
+        ],
+        coordinator: { enabled: true, maxDispatchesPerTick: 1 },
+      },
+    };
+    const createdPlannerItem = {
+      id: 'planning-1',
+      title: 'Plan Goal: 将上一份报告拆成很多验证 item',
+      status: 'READY',
+      workType: 'PLANNING',
+      ownerId: null,
+      assignments: [],
+      goal: { id: 'goal-2', title: '将上一份报告拆成很多验证 item' },
+    };
+    const prisma = {
+      projectGoal: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 'goal-2',
+            title: '将上一份报告拆成很多验证 item',
+            description: null,
+            priority: 7,
+            status: 'OPEN',
+            createdAt: new Date('2026-06-20T07:00:00.000Z'),
+            workItems: [],
+          },
+        ]),
+      },
+      projectWorkItem: {
+        create: jest.fn().mockResolvedValue(createdPlannerItem),
+        findMany: jest.fn().mockResolvedValue([createdPlannerItem]),
+      },
+      projectMember: { findMany: jest.fn().mockResolvedValue([]) },
+      projectAssignment: { findMany: jest.fn().mockResolvedValue([]) },
+    };
+    const agentWorkspaceClient = {
+      recordProjectEvent: jest.fn().mockResolvedValue({}),
+    };
+    const runtimeService = new ProjectsService(
+      prisma as never,
+      agentWorkspaceClient as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      { get: () => undefined } as never,
+      {} as never,
+    ) as any;
+    runtimeService.ensureProjectManager = jest.fn().mockResolvedValue({ ownerId: 'owner-user', settings });
+    runtimeService.listLaunchableRoleSummaries = jest.fn().mockResolvedValue([{ role: 'PLANNER_AGENT' }]);
+    runtimeService.ensureProjectActiveAgentCapacity = jest.fn().mockResolvedValue({ activeAgentCount: 0, maxActiveAgents: 10 });
+    runtimeService.ownerVisibleLlmConfigCandidates = jest.fn().mockResolvedValue([{ id: 'model-config-1' }]);
+    runtimeService.launchAgentRuntime = jest.fn().mockResolvedValue({
+      memberId: 'planner-member',
+      userId: 'planner-user',
+      session: { runtimeId: 'planner-runtime-1' },
+    });
+    runtimeService.createAssignment = jest.fn().mockResolvedValue({
+      id: 'assignment-1',
+      workItemId: 'planning-1',
+      contextPacket: {},
+    });
+    runtimeService.wakeRuntimeForAssignment = jest.fn().mockResolvedValue({ accepted: true });
+
+    await runtimeService.tickProjectCoordinator('project-1', 'owner-user');
+
+    expect(prisma.projectWorkItem.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        goalId: 'goal-2',
+        workType: 'PLANNING',
+        inputPacket: expect.objectContaining({
+          source: 'project-coordinator',
+          planningMode: 'goal-analysis',
+          discoveryInstructions: expect.objectContaining({
+            source: 'goal-analysis',
+            goalListEndpoint: '/v1/projects/{projectId}/goals?includeClosed=true&limit=100',
+            goalWorkItemsEndpoint: '/v1/projects/{projectId}/work-items?goalId={goalId}&statuses=ACCEPTED&includeClosed=true&limit=100',
+            workItemDetailEndpoint: '/v1/projects/{projectId}/work-items/{workItemId}',
+            artifactSelection: expect.objectContaining({
+              downstreamArtifactRule: expect.stringContaining('downstream/background context'),
+              coverageRule: expect.stringContaining('coverage-preserving verification items'),
+              granularityRule: expect.stringContaining('one work item per source row/opportunity'),
+            }),
+          }),
+        }),
+        scopeBrief: expect.stringContaining('list project goals, inspect the relevant prior goal, list its child work items'),
+        acceptanceCriteria: expect.stringContaining('Classify discovered files into sourceArtifacts and downstreamArtifacts'),
+      }),
+    }));
+    const createdInputPacket = (prisma.projectWorkItem.create.mock.calls[0][0] as any).data.inputPacket;
+    const createdAcceptanceCriteria = (prisma.projectWorkItem.create.mock.calls[0][0] as any).data.acceptanceCriteria;
+    expect(createdInputPacket.acceptedUpstreamItems).toBeUndefined();
+    expect(createdInputPacket.projectFiles).toBeUndefined();
+    expect(createdAcceptanceCriteria).toContain('Batches of more than 3 source entries are not acceptable');
+  });
+
   it('coordinator does not recreate planner items for goals already analyzed by a prior planner item', async () => {
     const settings = {
       workItemStatusFlow: {
@@ -6370,7 +6983,9 @@ describe('ProjectsService project globals', () => {
 });
 
 describe('ProjectsService active agent limits', () => {
-  const activeMember = (status = 'IDLE') => ({ permissions: { runtimeSession: { status } } });
+  const activeMember = (status = 'IDLE', session: Record<string, unknown> = {}) => ({
+    permissions: { runtimeSession: { status, ...session } },
+  });
   const createService = (members: any[]) =>
     new ProjectsService(
       {
@@ -6417,6 +7032,30 @@ describe('ProjectsService active agent limits', () => {
       activeAgentCount: 1,
       maxActiveAgents: 2,
     });
+  });
+
+  it('does not count runtime sessions marked offline by health checks against active agent capacity', async () => {
+    const service = createService([
+      activeMember('IDLE', { apiHealth: { ok: false } }),
+      activeMember('READY', { dockerStatus: { running: false } }),
+      activeMember('TYPING'),
+    ]);
+
+    await expect(service.ensureProjectActiveAgentCapacity('project-1', { maxActiveAgents: 2 })).resolves.toEqual({
+      activeAgentCount: 1,
+      maxActiveAgents: 2,
+    });
+  });
+
+  it('blocks capacity checks when non-offline agents are still at the limit', async () => {
+    const service = createService([
+      { id: 'pending-member', permissions: {} },
+      { id: 'active-member', permissions: { runtimeSession: { status: 'IDLE' } } },
+    ]);
+
+    await expect(
+      service.ensureProjectActiveAgentCapacity('project-1', { maxActiveAgents: 1 }, { excludeMemberId: 'pending-member' }),
+    ).rejects.toThrow('Project active agent limit reached (1/1)');
   });
 
   it('does not count unavailable local docker runtimes against active agent capacity', async () => {
@@ -7749,6 +8388,149 @@ describe('ProjectsService runtime polling state', () => {
     expect(localService.createAgentRuntimeConversation).not.toHaveBeenCalled();
     expect(localService.sendAgentRuntimeMessage).not.toHaveBeenCalled();
     jest.useRealTimers();
+  });
+
+  it('uses the configured interval when an existing polling run has no nextRunAt', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-06-06T10:04:00.000Z'));
+    try {
+      const session = {
+        id: 'runtime-1',
+        runtimeId: 'runtime-1',
+        role: 'LEAD_AGENT',
+        status: 'IDLE',
+        pollingState: {
+          lastConversationId: 'poll-1',
+          lastRunAt: '2026-06-06T10:00:00.000Z',
+          lastCompletedAt: null,
+          nextRunAt: null,
+        },
+        conversations: [
+          {
+            id: 'poll-1',
+            messageHistory: [{ role: 'user', content: config.message, createdAt: '2026-06-06T10:00:00.000Z' }],
+          },
+        ],
+      };
+      const localService = new ProjectsService(
+        {
+          projectMember: {
+            findFirst: jest.fn().mockResolvedValue({ id: 'member-1', role: 'LEAD_AGENT', permissions: {} }),
+          },
+        } as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        { get: () => undefined } as never,
+        {} as never,
+      ) as any;
+      localService.ensureProjectAccess = jest.fn().mockResolvedValue({});
+      localService.readRuntimeSession = jest.fn().mockReturnValue(session);
+      localService.recoverPersistedRuntimeSession = jest.fn((value) => value);
+      localService.readAgentPollingConfig = jest.fn().mockReturnValue(null);
+      localService.agentPollingConfigForRole = jest.fn().mockResolvedValue(config);
+      localService.agentRuntimeLauncher = { inspect: jest.fn().mockResolvedValue(session) };
+      localService.writeRuntimeSession = jest.fn();
+      localService.createAgentRuntimeConversation = jest.fn();
+      localService.sendAgentRuntimeMessage = jest.fn();
+
+      const result = await localService.tickAgentRuntimePolling('project-1', 'member-1', 'owner-1');
+
+      expect(result).toEqual(expect.objectContaining({
+        memberId: 'member-1',
+        role: 'LEAD_AGENT',
+        triggered: false,
+        reason: 'Polling is not due yet.',
+        pollingState: expect.objectContaining({
+          nextRunAt: '2026-06-06T10:05:00.000Z',
+        }),
+      }));
+      expect(localService.writeRuntimeSession).toHaveBeenCalledWith(
+        'member-1',
+        expect.objectContaining({
+          pollingState: expect.objectContaining({
+            nextRunAt: '2026-06-06T10:05:00.000Z',
+          }),
+        }),
+      );
+      expect(localService.createAgentRuntimeConversation).not.toHaveBeenCalled();
+      expect(localService.sendAgentRuntimeMessage).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('sets the next run time as soon as an enabled polling tick starts', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-06-06T10:00:00.000Z'));
+    try {
+      const session = {
+        id: 'runtime-1',
+        runtimeId: 'runtime-1',
+        role: 'LEAD_AGENT',
+        status: 'IDLE',
+        activeConversationId: 'main',
+        pollingState: {},
+        conversations: [{ id: 'main', messageHistory: [] }],
+      };
+      const messageSession = {
+        ...session,
+        activeConversationId: 'poll-1',
+        conversations: [
+          ...session.conversations,
+          { id: 'poll-1', messageHistory: [{ role: 'user', content: config.message }] },
+        ],
+      };
+      const localService = new ProjectsService(
+        {
+          projectMember: {
+            findFirst: jest.fn().mockResolvedValue({ id: 'member-1', role: 'LEAD_AGENT', permissions: {} }),
+          },
+        } as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        { get: () => undefined } as never,
+        {} as never,
+      ) as any;
+      localService.ensureProjectAccess = jest.fn().mockResolvedValue({});
+      localService.readRuntimeSession = jest.fn().mockReturnValue(session);
+      localService.recoverPersistedRuntimeSession = jest.fn((value) => value);
+      localService.readAgentPollingConfig = jest.fn().mockReturnValue(config);
+      localService.agentPollingConfigForRole = jest.fn().mockResolvedValue(config);
+      localService.agentRuntimeLauncher = { inspect: jest.fn().mockResolvedValue(session) };
+      localService.writeRuntimeSession = jest.fn();
+      localService.createAgentRuntimeConversation = jest.fn().mockResolvedValue({
+        conversation: { id: 'poll-1', title: 'polling 10:00' },
+      });
+      localService.sendAgentRuntimeMessage = jest.fn().mockResolvedValue({ session: messageSession });
+      localService.latestRuntimeSessionForMember = jest.fn().mockResolvedValue(null);
+
+      const result = await localService.tickAgentRuntimePolling('project-1', 'member-1', 'owner-1', { summary: true });
+
+      expect(result).toEqual(expect.objectContaining({
+        memberId: 'member-1',
+        role: 'LEAD_AGENT',
+        triggered: true,
+        pollingState: expect.objectContaining({
+          lastConversationId: 'poll-1',
+          lastRunAt: '2026-06-06T10:00:00.000Z',
+          nextRunAt: '2026-06-06T10:05:00.000Z',
+        }),
+      }));
+      expect(localService.writeRuntimeSession).toHaveBeenLastCalledWith(
+        'member-1',
+        expect.objectContaining({
+          pollingConfig: expect.objectContaining({ enabled: true }),
+          pollingState: expect.objectContaining({
+            lastConversationId: 'poll-1',
+            nextRunAt: '2026-06-06T10:05:00.000Z',
+          }),
+        }),
+      );
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('runs a forced polling tick even when timed polling is disabled', async () => {

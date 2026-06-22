@@ -65,17 +65,20 @@ describe('ProjectTemplatesService', () => {
       ]),
     );
     const lead = template.roles.find((entry) => entry.role === 'LEAD_AGENT');
+    expect(lead?.skillBundleRefs).toEqual(expect.arrayContaining(['skill://hackerone-bounty-workflow']));
+    expect(lead?.initialPrompt?.length ?? 0).toBeLessThan(7000);
+    expect(lead?.initialPrompt).toContain('use $hackerone-bounty-workflow');
+    expect(lead?.initialPrompt).toContain('Do not list all globals, goals, work items');
+    expect(lead?.initialPrompt).toContain('/goals?statuses=IN_PROGRESS,BLOCKED&includeClosed=false&limit=100');
+    expect(lead?.initialPrompt).toContain('/work-items?goalId=<goalId>&statuses=READY,NEEDS_REVISION,IN_REVIEW,ASSIGNED,IN_PROGRESS,REPORT_READY&limit=100&page=1');
     expect(lead?.initialPrompt).toContain('prefer local-docker Pi workers');
     expect(lead?.initialPrompt).toContain('On every polling tick');
     expect(lead?.initialPrompt).toContain('analysed/project-addresses.jsonl');
     expect(lead?.initialPrompt).toContain('coordination/lead-goal-ledger.jsonl');
     expect(lead?.initialPrompt).toContain('statusDigest');
-    expect(lead?.initialPrompt).toContain('skip any candidate whose normalized HackerOne project/program URL');
-    expect(lead?.initialPrompt).toContain('parse runtime comments for claimed evidence/coverage paths');
-    expect(lead?.initialPrompt).toContain('regenerate bounded Phase 1 evidence from public/passive sources');
-    expect(lead?.initialPrompt).toContain('inputPacket.requiredGlobals set to those exact keys');
-    expect(lead?.initialPrompt).toContain('The coordinator will hold the continuation while requiredGlobals are missing');
-    expect(lead?.polling?.message).toContain('analysed/ project-address records');
+    expect(lead?.initialPrompt).toContain('required for discovery');
+    expect(lead?.polling?.message).toContain('paginated status filters');
+    expect(lead?.polling?.message).toContain('Read ACCEPTED summaries only');
     expect(lead?.polling?.message).toContain('do not create a new generic HackerOne Opportunity Discovery/Ongoing Target goal');
     expect(lead?.polling).toEqual(
       expect.objectContaining({
@@ -130,11 +133,12 @@ describe('ProjectTemplatesService', () => {
       expect.arrayContaining([
         expect.objectContaining({ role: 'LEAD_AGENT', launchMode: 'local-docker', agentType: 'pi' }),
         expect.objectContaining({ role: 'WORKER_AGENT', launchMode: 'local-docker', agentType: 'pi' }),
+        expect.objectContaining({ role: 'AGGREGATOR_AGENT', launchMode: 'local-docker', agentType: 'pi' }),
         expect.objectContaining({ role: 'INTEGRATOR_AGENT', launchMode: 'local-docker', agentType: 'pi' }),
       ]),
     );
     expect(template.roles.map((entry) => entry.role)).toEqual(
-      expect.arrayContaining(['COORDINATOR', 'LEAD_AGENT', 'WORKER_AGENT', 'REVIEW_AGENT']),
+      expect.arrayContaining(['COORDINATOR', 'LEAD_AGENT', 'WORKER_AGENT', 'REVIEW_AGENT', 'AGGREGATOR_AGENT']),
     );
     expect(template.workItemStatusFlow?.coordinator).toEqual(
       expect.objectContaining({ enabled: true, maxDispatchesPerTick: 3, launchMode: 'local-docker', agentType: 'pi' }),
@@ -143,7 +147,8 @@ describe('ProjectTemplatesService', () => {
       expect.arrayContaining([
         expect.objectContaining({ role: 'PLANNER_AGENT', workTypes: ['INTAKE', 'PLANNING'] }),
         expect.objectContaining({ role: 'WORKER_AGENT', workTypes: expect.arrayContaining(['RESEARCH', 'ANALYSIS', 'WRITING']) }),
-        expect.objectContaining({ role: 'INTEGRATOR_AGENT', workTypes: expect.arrayContaining(['AGGREGATION', 'SYNTHESIS', 'DELIVERY']) }),
+        expect.objectContaining({ role: 'AGGREGATOR_AGENT', workTypes: expect.arrayContaining(['AGGREGATION', 'SYNTHESIS', 'DELIVERY']) }),
+        expect.objectContaining({ role: 'INTEGRATOR_AGENT', workTypes: ['INTEGRATION'] }),
         expect.objectContaining({ role: 'REVIEW_AGENT', statuses: ['IN_REVIEW'] }),
         expect.objectContaining({ role: 'WORKER_AGENT', statuses: ['READY', 'NEEDS_REVISION'] }),
       ]),
