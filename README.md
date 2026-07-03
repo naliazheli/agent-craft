@@ -11,7 +11,7 @@ git submodule update --init --recursive
 ```
 
 - **[agent-workspace](https://github.com/naliazheli/agent-workspace)**: project collaboration primitives, shared project file storage, runtime grants, and workspace skills.
-- **[hermes-agent](https://github.com/naliazheli/hermes-agent)**: Hermes runtime image source.
+- **[external/hermes-agent](https://github.com/naliazheli/hermes-agent)**: Hermes runtime package version pin and reference checkout.
 - **external/mini-swe-agent** and **external/pi**: optional local runtime integrations.
 
 Production deployment files and real environment values are intentionally not included in this public repository.
@@ -21,15 +21,29 @@ Production deployment files and real environment values are intentionally not in
 ```text
 aifactory/
 ├─ agent-workspace/           # submodule: project workspace service + skills
-├─ hermes-agent/              # submodule: Hermes runtime
 ├─ aifactory-server/          # NestJS 后端 API + MCP Server
 ├─ aifactory-ui/              # React 前端 (Vite + Tailwind)
-├─ external/                  # submodules for optional local agents
+├─ external/                  # external agent/runtime submodules, including hermes-agent
 ├─ docker-compose.yml         # 本地开发数据库 (MySQL)
 ├─ docker-compose.local.yml    # 本地 Docker 联调 (前后端+MCP+MySQL+Redis)
 ├─ restart.bat                # Windows 一键启动开发模式
 └─ restart-local-docker.bat   # Windows 一键启动 Docker 模式
 ```
+
+## 本地 Agent 镜像
+
+Hermes runtime 镜像不再从本地 Hermes 源码树构建。`build-hermes-agent-image.*`
+使用 `docker/hermes-agent.real.Dockerfile` 和较小的 `docker/` build context，
+并默认从 `external/hermes-agent` 子模块的 remote 与 pinned commit 推导
+`HERMES_AGENT_INSTALL_SPEC`，在镜像内部安装 Hermes。
+
+常用覆盖项：
+
+- `HERMES_AGENT_INSTALL_SPEC`：完整 pip 安装 spec，例如 `hermes-agent[pty] @ git+https://github.com/naliazheli/hermes-agent.git@main` 或 PyPI 版本。
+- `HERMES_AGENT_REPO_URL` / `HERMES_AGENT_REF`：未设置 `HERMES_AGENT_INSTALL_SPEC` 时用于生成默认 Git install spec。
+- `HERMES_AGENT_BUILD_CONTEXT`：Docker build context，默认 `docker/`。
+
+`external/hermes-agent` 只作为版本 pin 和参考 checkout，不作为 Docker build context。
 
 ## 技术栈
 

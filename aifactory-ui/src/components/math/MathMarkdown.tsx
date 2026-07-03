@@ -1,5 +1,6 @@
 import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
+import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 
@@ -25,7 +26,7 @@ export function MathMarkdown({
   return (
     <div className={`math-content space-y-3 text-sm leading-7 ${className}`.trim()}>
       <ReactMarkdown
-        remarkPlugins={[remarkMath, remarkBreaks]}
+        remarkPlugins={[remarkGfm, remarkMath, remarkBreaks]}
         rehypePlugins={[rehypeKatex]}
         components={{
           p: ({ children }) => <p className="whitespace-pre-wrap text-inherit">{children}</p>,
@@ -47,6 +48,16 @@ export function MathMarkdown({
               {children}
             </blockquote>
           ),
+          table: ({ children }) => (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[520px] border-collapse text-left text-sm">
+                {children}
+              </table>
+            </div>
+          ),
+          thead: ({ children }) => <thead className="bg-muted/50">{children}</thead>,
+          th: ({ children }) => <th className="border px-3 py-2 font-semibold text-foreground">{children}</th>,
+          td: ({ children }) => <td className="border px-3 py-2 align-top">{children}</td>,
           code: ({ children }) => (
             <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[0.9em]">
               {children}

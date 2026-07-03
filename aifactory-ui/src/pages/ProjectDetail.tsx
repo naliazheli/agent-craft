@@ -1340,7 +1340,7 @@ const DEFAULT_PROJECT_COORDINATOR_CONFIG: ProjectCoordinatorConfig = {
   dispatchRules: [],
 };
 const CLOUD_AGENT_UNAVAILABLE_NOTICE =
-  'Cloud Agent is not configured in this open-source build. Use local runner modes, or configure your own cloud runtime in a private deployment.';
+  'Cloud Agent is temporarily unavailable. AWS has not been able to lift the runtime restrictions on my new account, so hosted cloud agents are paused for now. If another cloud provider would like to support this capability, please contact me at nalia0316@gmail.com.';
 const DEFAULT_LAUNCH_CONFIG_FORM = {
   name: '',
   apiType: 'openai' as 'openai' | 'claude',
@@ -1601,6 +1601,7 @@ function displayLaunchTarget(launchMode?: AgentLaunchMode | string | null, agent
 }
 
 type ProjectSectionKey = 'home' | 'events' | 'members' | 'planning' | 'work' | 'knowledge' | 'documents' | 'delivery' | 'settings';
+type ProjectSectionParam = ProjectSectionKey | 'resources';
 type AgentRuntimePanelKey = 'workspace' | 'skills' | 'scope' | 'runner' | 'polling' | 'prompt' | null;
 type WorkItemsView = 'list' | 'new' | 'detail';
 type WorkItemDetailTab = 'details' | 'activity' | 'discussion' | 'execution';
@@ -1621,6 +1622,17 @@ const PROJECT_SECTIONS: Array<{
   { key: 'delivery', label: 'Delivery', description: 'Artifacts and reviews', icon: ClipboardCheck },
   { key: 'settings', label: 'Settings', description: 'Project profile and resources', icon: ShieldCheck },
 ];
+const PROJECT_SECTION_KEYS = new Set<ProjectSectionKey>(PROJECT_SECTIONS.map((item) => item.key));
+
+function normalizeProjectSectionParam(section?: string | null): ProjectSectionKey | null {
+  if (!section) return null;
+  if (section === 'resources') return 'documents';
+  return PROJECT_SECTION_KEYS.has(section as ProjectSectionKey) ? (section as ProjectSectionKey) : null;
+}
+
+function projectSectionUrlParam(section: ProjectSectionKey): ProjectSectionParam {
+  return section === 'documents' ? 'resources' : section;
+}
 
 function formatRuntimeStatusLabel(status?: string | null) {
   return (status || 'UNKNOWN').toLowerCase().replace(/_/g, ' ');
@@ -2026,6 +2038,19 @@ function projectFileListItems(response: { folders?: ProjectFileEntry[]; files?: 
     return !identity || !folderIdentities.has(identity);
   });
   return [...folders, ...files];
+}
+
+function projectDirectoryFiles(response: { folders?: Array<{ path?: string | null }>; files?: ProjectFileEntry[] }) {
+  const renderedFolderPaths = new Set(
+    (response.folders || [])
+      .map((folder) => normalizeProjectFileFolderPath(folder.path))
+      .filter(Boolean),
+  );
+  return (response.files || []).filter((file) => {
+    if (file.type !== 'folder') return true;
+    const folderPath = normalizeProjectFileFolderPath(file.path);
+    return !folderPath || !renderedFolderPaths.has(folderPath);
+  });
 }
 
 function artifactResources(artifact: any): ProjectFileEntry[] {
@@ -2486,6 +2511,7 @@ export function ProjectDetail() {
   const [agentAttachments, setAgentAttachments] = useState<AgentMessageAttachment[]>([]);
   const [agentHistoryOpen, setAgentHistoryOpen] = useState(false);
   const [agentHistoryWidth, setAgentHistoryWidth] = useState(184);
+  const [leaderChatPinned, setLeaderChatPinned] = useState(false);
   const [selectedAgentConversationId, setSelectedAgentConversationId] = useState('');
   const [editingAgentConversationId, setEditingAgentConversationId] = useState('');
   const [agentConversationTitleDraft, setAgentConversationTitleDraft] = useState('');
@@ -2682,7 +2708,7 @@ export function ProjectDetail() {
       setAgentRuntimeImages(imageRes.images || []);
       setAgentProfiles(profileRes.profiles || []);
       setApiConfigs(apiConfigRes || []);
-      setProjectFiles(fileRes.files || []);
+      setProjectFiles(projectDirectoryFiles(fileRes));
       setProjectFolders(fileRes.folders || []);
       setAllProjectFiles(allFileRes.files || fileRes.files || []);
     } catch (err: any) {
@@ -2761,9 +2787,8 @@ export function ProjectDetail() {
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
-    const section = params.get('section') as ProjectSectionKey | null;
-    const validSections = new Set<ProjectSectionKey>(PROJECT_SECTIONS.map((item) => item.key));
-    if (section && validSections.has(section)) {
+    const section = normalizeProjectSectionParam(params.get('section'));
+    if (section) {
       setActiveProjectSection(section);
       if (section === 'work') {
         const view = params.get('view');
@@ -3829,6 +3854,24 @@ export function ProjectDetail() {
     return new Map(allProjectFiles.map((file) => [normalizeProjectFileFolderPath(file.path), file]));
   }, [allProjectFiles]);
 
+  const allWorkItemsById = useMemo(() => {
+    const byId = new Map<string, ProjectWorkItem>();
+    [...homeWorkItemsForUi, ...workItems].forEach((item) => {
+      byId.set(item.id, item);
+    });
+    return byId;
+  }, [homeWorkItemsForUi, workItems]);
+
+  const workItemArtifactCount = useCallback(
+    (item?: ProjectWorkItem | null) => {
+      if (!item) return 0;
+      const countedArtifacts = (item as any)._count?.artifacts;
+      if (typeof countedArtifacts === 'number') return countedArtifacts;
+      return artifacts.filter((artifact) => artifact.workItemId === item.id).length;
+    },
+    [artifacts],
+  );
+
   const homeOutputFiles = useMemo(() => {
     const byPath = new Map<string, ProjectFileEntry>();
     homeWorkItemsForUi.forEach((item) => {
@@ -3852,6 +3895,31 @@ export function ProjectDetail() {
 
   const homeGoalSummaries = useMemo(() => {
     const goals = ((project?.goals || []) as ProjectGoalOption[]);
+    const fallbackProjectFile = (path: string): ProjectFileEntry => {
+      const normalizedPath = normalizeProjectFileFolderPath(path);
+      return projectFileByPath.get(normalizedPath) || {
+        path: normalizedPath,
+        key: normalizedPath,
+        size: 0,
+        type: 'file',
+      };
+    };
+    const artifactGoalId = (artifact: any) => {
+      const metadata = isRecord(artifact?.metadata) ? artifact.metadata : {};
+      const metadataGoal = isRecord(metadata.goal) && typeof metadata.goal.id === 'string' ? metadata.goal.id : '';
+      const explicitGoalId =
+        (typeof artifact?.goalId === 'string' ? artifact.goalId : '') ||
+        (typeof metadata.goalId === 'string' ? metadata.goalId : '') ||
+        metadataGoal ||
+        (typeof artifact?.workItem?.goalId === 'string' ? artifact.workItem.goalId : '');
+      if (explicitGoalId) return explicitGoalId;
+      const workItemId =
+        (typeof artifact?.workItemId === 'string' ? artifact.workItemId : '') ||
+        (typeof artifact?.workItem?.id === 'string' ? artifact.workItem.id : '');
+      const linkedItem = workItemId ? allWorkItemsById.get(workItemId) : null;
+      if (linkedItem) return resolveWorkItemGoalId(linkedItem) || '';
+      return goals.length === 1 ? goals[0].id : '';
+    };
     return goals.map((goal) => {
       const items = homeWorkItemsForUi.filter((item) => resolveWorkItemGoalId(item) === goal.id);
       const statusCounts = items.reduce<Record<string, number>>((counts, item) => {
@@ -3878,6 +3946,65 @@ export function ProjectDetail() {
           new Date(right.lastModified || 0).getTime() - new Date(left.lastModified || 0).getTime() ||
           left.path.localeCompare(right.path),
       );
+      const goalArtifacts = artifacts
+        .filter((artifact) => artifactGoalId(artifact) === goal.id)
+        .sort(
+          (left, right) =>
+            new Date(right.createdAt || right.updatedAt || 0).getTime() -
+            new Date(left.createdAt || left.updatedAt || 0).getTime(),
+        );
+      const artifactFileByPath = new Map<string, ProjectFileEntry>();
+      goalArtifacts.forEach((artifact) => {
+        artifactResources(artifact).forEach((file) => {
+          const normalizedPath = normalizeProjectFileFolderPath(file.path);
+          if (!normalizedPath || artifactFileByPath.has(normalizedPath)) return;
+          artifactFileByPath.set(normalizedPath, {
+            ...fallbackProjectFile(normalizedPath),
+            ...file,
+            path: normalizedPath,
+            key: file.key || normalizedPath,
+            type: 'file',
+          });
+        });
+      });
+      const deliveryFilesByPath = new Map<string, ProjectFileEntry>();
+      [...outputFiles, ...artifactFileByPath.values()].forEach((file) => {
+        const normalizedPath = normalizeProjectFileFolderPath(file.path);
+        if (!normalizedPath || deliveryFilesByPath.has(normalizedPath)) return;
+        deliveryFilesByPath.set(normalizedPath, {
+          ...fallbackProjectFile(normalizedPath),
+          ...file,
+          path: normalizedPath,
+          key: file.key || normalizedPath,
+          type: file.type || 'file',
+        });
+      });
+      const deliveryFiles = [...deliveryFilesByPath.values()].sort(
+        (left, right) =>
+          new Date(right.lastModified || 0).getTime() - new Date(left.lastModified || 0).getTime() ||
+          left.path.localeCompare(right.path),
+      );
+      const needsRevisionItems = items.filter((item) => ['NEEDS_REVISION', 'REJECTED'].includes(item.status));
+      const reviewItems = items.filter((item) => item.status === 'IN_REVIEW');
+      const readyItems = items.filter((item) => ['READY', 'ASSIGNED'].includes(item.status));
+      const ownerItems = items.filter((item) => getWorkItemResourceRequest(item) || getWorkItemOwnerAction(item));
+      const artifactCount = goalArtifacts.length || items.reduce((sum, item) => sum + workItemArtifactCount(item), 0);
+      const latestArtifact = goalArtifacts[0] || null;
+      const latestFile = deliveryFiles[0] || null;
+      const nextAction =
+        ownerItems.length
+          ? `${ownerItems.length} owner input${ownerItems.length === 1 ? '' : 's'} needed`
+          : needsRevisionItems.length
+            ? `${needsRevisionItems.length} item${needsRevisionItems.length === 1 ? '' : 's'} need rework`
+            : reviewItems.length
+              ? `${reviewItems.length} item${reviewItems.length === 1 ? '' : 's'} ready for review`
+              : latestArtifact || latestFile
+                ? 'Review latest result'
+                : readyItems.length
+                  ? `${readyItems.length} item${readyItems.length === 1 ? '' : 's'} waiting to run`
+                  : items.length
+                    ? 'Keep execution moving'
+                    : 'Add work items';
       return {
         goal,
         items,
@@ -3885,10 +4012,19 @@ export function ProjectDetail() {
         acceptedCount,
         activeCount,
         outputFiles,
+        deliveryFiles,
+        artifacts: goalArtifacts,
+        latestArtifact,
+        latestFile,
+        needsRevisionItems,
+        reviewItems,
+        ownerItems,
+        nextAction,
+        artifactCount,
         progress: items.length ? Math.round((acceptedCount / items.length) * 100) : 0,
       };
     });
-  }, [homeWorkItemsForUi, project?.goals, projectFileByPath]);
+  }, [allWorkItemsById, artifacts, homeWorkItemsForUi, project?.goals, projectFileByPath, workItemArtifactCount]);
 
   const selectedRelatedWorkItems = useMemo(() => {
     const item = selectedWorkItemForDetail as any;
@@ -4147,9 +4283,9 @@ export function ProjectDetail() {
         icon: Rocket,
       },
       {
-        label: 'Outputs',
-        value: homeOutputFiles.length,
-        detail: `${artifacts.length} artifacts`,
+        label: 'Artifacts',
+        value: artifacts.length,
+        detail: `${homeOutputFiles.length} shared files`,
         icon: FileText,
       },
       {
@@ -4164,7 +4300,6 @@ export function ProjectDetail() {
       artifacts.length,
       boardSnapshot?.metrics.reviews,
       boardSnapshot?.metrics.runStatusCounts.RUNNING,
-      handoffArtifacts.length,
       homeOutputFiles.length,
       openReviews.length,
       reviews.length,
@@ -4222,6 +4357,7 @@ export function ProjectDetail() {
       .sort((a: any, b: any) => new Date(b.createdAt || b.updatedAt || 0).getTime() - new Date(a.createdAt || a.updatedAt || 0).getTime())
       .slice(0, 4);
   }, [artifacts, boardSnapshot?.recent.artifacts]);
+  const latestDeliveryArtifact = homeRecentArtifacts[0] || null;
 
   const homeCockpitMembers = useMemo(
     () => (boardSnapshot?.cockpit?.length ? boardSnapshot.cockpit : cockpitMembers).slice(0, 4),
@@ -4841,6 +4977,16 @@ export function ProjectDetail() {
       });
   }, [activeMembers, isReadOnly, runtimeByMemberId, selectedAgentConversation?.id]);
 
+  const leaderAgentMember = useMemo(
+    () =>
+      projectAgentChatMembers.find(({ member }) => member.role === 'LEAD_AGENT')?.member ||
+      activeMembers.find((member) => member.role === 'LEAD_AGENT') ||
+      null,
+    [activeMembers, projectAgentChatMembers],
+  );
+  const leaderAgentRuntime = leaderAgentMember ? runtimeByMemberId.get(leaderAgentMember.id) || null : null;
+  const leaderAgentIsSelected = Boolean(leaderAgentMember && selectedAgentMemberId === leaderAgentMember.id);
+
   const selectedAgentIsReachable = runtimeIsReachable(selectedAgentRuntime);
   const selectedAgentHasActiveRequest = runtimeHasActiveRequest(selectedAgentRuntime);
   const selectedAgentCanSteer = selectedAgentIsTyping && runtimeCanAcceptSteer(selectedAgentRuntime);
@@ -4860,6 +5006,13 @@ export function ProjectDetail() {
       ['local-docker', 'local-runner', 'local-codex'].includes(selectedAgentRuntime.session.provider) &&
       !selectedAgentIsReachable &&
       selectedAgentRuntime.session.status !== 'TYPING' &&
+      !isReadOnly,
+  );
+  const leaderAgentCanReconnect = Boolean(
+    leaderAgentRuntime &&
+      canReconnectAgentRuntime(leaderAgentRuntime) &&
+      !runtimeIsReachable(leaderAgentRuntime) &&
+      leaderAgentRuntime.session.status !== 'TYPING' &&
       !isReadOnly,
   );
   const selectedAgentMessagePlaceholder = selectedAgentIsTyping
@@ -5082,6 +5235,13 @@ export function ProjectDetail() {
     setAgentAttachments([]);
     setAgentRuntimePanel(null);
     setCoordinatorConfigOpen(false);
+  };
+
+  const handleOpenLeaderChat = () => {
+    if (!leaderAgentMember) return;
+    if (selectedAgentMemberId !== leaderAgentMember.id) {
+      handleSelectAgentRuntime(leaderAgentMember.id);
+    }
   };
 
   const handleSelectAgentConversation = (conversationId: string) => {
@@ -5521,10 +5681,11 @@ export function ProjectDetail() {
       });
       setProjectFolders(search ? [] : res.folders || []);
       const items = res.files || [];
-      setProjectFiles(items);
+      const visibleFiles = projectDirectoryFiles({ folders: search ? [] : res.folders || [], files: items });
+      setProjectFiles(visibleFiles);
       setSelectedProjectFile((current) => {
         if (!current) return null;
-        return items.find((file) => file.key === current.key) || null;
+        return visibleFiles.find((file) => file.key === current.key) || null;
       });
     } catch (err: any) {
       setError(err.message || 'Failed to load project resources');
@@ -5707,6 +5868,35 @@ export function ProjectDetail() {
     setWorkItemProjectFilePreview(previewFile);
     setSelectedProjectFile(previewFile);
     setError('');
+    await loadProjectFilePreview(previewFile);
+  };
+
+  const handleOpenProjectFileInResources = async (file: ProjectFileEntry) => {
+    if (!id || !canAccessProjectFiles || file.type === 'folder') return;
+    const normalizedPath = normalizeProjectFileFolderPath(file.path);
+    const indexedFile = allProjectFiles.find((entry) => normalizeProjectFileFolderPath(entry.path) === normalizedPath);
+    const previewFile: ProjectFileEntry = {
+      ...file,
+      ...(indexedFile || {}),
+      path: indexedFile?.path || normalizedPath || file.path,
+      key: indexedFile?.key || file.key || normalizedPath || file.path,
+      size: indexedFile?.size ?? file.size ?? 0,
+      type: indexedFile?.type || file.type || 'file',
+    };
+    const nextPrefix = parentProjectFilePrefix(previewFile.path);
+    setWorkItemProjectFilePreview(null);
+    setActiveProjectSection('documents');
+    setProjectFilePrefix(nextPrefix);
+    setProjectFileSearch('');
+    setSelectedProjectFile(previewFile);
+    setProjectFilePreviewError('');
+    setError('');
+    const params = new URLSearchParams(location.search);
+    params.set('section', projectSectionUrlParam('documents'));
+    params.delete('view');
+    params.delete('item');
+    navigate({ pathname: location.pathname, search: `?${params.toString()}` });
+    await loadProjectFiles('', nextPrefix);
     await loadProjectFilePreview(previewFile);
   };
 
@@ -6440,11 +6630,11 @@ export function ProjectDetail() {
     const params = new URLSearchParams(location.search);
     if (section === 'work') {
       setWorkItemsView('list');
-      params.set('section', section);
+      params.set('section', projectSectionUrlParam(section));
       params.delete('view');
       params.delete('item');
     } else {
-      params.set('section', section);
+      params.set('section', projectSectionUrlParam(section));
       params.delete('view');
       params.delete('item');
     }
@@ -6460,6 +6650,28 @@ export function ProjectDetail() {
     setActiveProjectSection('work');
     setWorkItemsView('detail');
     navigate({ pathname: location.pathname, search: `?${params.toString()}` });
+  };
+
+  const handleOpenGoalWorkItems = (goalId: string, status = 'ALL') => {
+    setWorkGoalFilter(goalId);
+    setWorkStatusFilter(status);
+    setWorkItemSearch('');
+    setWorkItemsView('list');
+    openProjectSection('work');
+  };
+
+  const handleReviewArtifactFromHome = (artifact: any) => {
+    const workItemId =
+      (typeof artifact?.workItemId === 'string' ? artifact.workItemId : '') ||
+      (typeof artifact?.workItem?.id === 'string' ? artifact.workItem.id : '');
+    setReviewForm((prev) => ({
+      ...prev,
+      workItemId,
+      artifactId: artifact?.id || '',
+      reviewerType: 'HUMAN',
+      status: 'APPROVED',
+    }));
+    openProjectSection('delivery');
   };
 
   const handleHomeWorkItemPanelClick = (event: React.MouseEvent<HTMLElement>, workItemId: string) => {
@@ -8132,11 +8344,201 @@ export function ProjectDetail() {
     </Button>
   );
 
+  const renderGoalOutcomeCard = (summary: (typeof homeGoalSummaries)[number]) => {
+    const {
+      goal,
+      items,
+      progress,
+      artifactCount,
+      deliveryFiles,
+      latestArtifact,
+      latestFile,
+      needsRevisionItems,
+      reviewItems,
+      ownerItems,
+      nextAction,
+    } = summary;
+    const visibleFiles = deliveryFiles.slice(0, 3);
+    const attentionCount = ownerItems.length + needsRevisionItems.length;
+    const latestArtifactWorkItemId =
+      (typeof latestArtifact?.workItemId === 'string' ? latestArtifact.workItemId : '') ||
+      (typeof latestArtifact?.workItem?.id === 'string' ? latestArtifact.workItem.id : '');
+    const latestArtifactWorkItem = latestArtifactWorkItemId ? allWorkItemsById.get(latestArtifactWorkItemId) : null;
+    const outcomeTone = attentionCount ? 'border-amber-400/50 bg-amber-50/60' : latestArtifact || latestFile ? 'border-emerald-300/60 bg-emerald-50/60' : 'border-border bg-background';
+
+    return (
+      <div key={goal.id} className={`rounded-lg border p-4 ${outcomeTone}`}>
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+          <div className="min-w-0 space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant={attentionCount ? 'warning' : latestArtifact || latestFile ? 'success' : 'secondary'}>
+                Goal Outcome
+              </Badge>
+              <Badge variant="outline">{goal.status || 'OPEN'}</Badge>
+              <Badge variant="outline">{artifactCount} artifacts</Badge>
+              <Badge variant="outline">{deliveryFiles.length} files</Badge>
+            </div>
+            <h2 className="whitespace-pre-wrap break-words text-lg font-semibold leading-6">{goal.title}</h2>
+            <p className="text-sm leading-6 text-muted-foreground">
+              {nextAction}
+            </p>
+          </div>
+          <div className="w-full shrink-0 xl:w-64">
+            <div className="mb-2 flex items-center justify-between text-xs text-muted-foreground">
+              <span>Accepted work</span>
+              <span>{progress}%</span>
+            </div>
+            <div className="h-2 overflow-hidden rounded-full bg-background/80">
+              <div className="h-full rounded-full bg-primary" style={{ width: `${progress}%` }} />
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button type="button" size="sm" variant="outline" onClick={() => handleOpenGoalWorkItems(goal.id)}>
+                <Layers3 className="mr-2 h-4 w-4" />
+                Items
+              </Button>
+              {attentionCount ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => handleOpenGoalWorkItems(goal.id, ownerItems.length ? 'READY' : 'NEEDS_REVISION')}
+                >
+                  <AlertTriangle className="mr-2 h-4 w-4" />
+                  Attention
+                </Button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(280px,0.85fr)]">
+          <div className="rounded-md border bg-background/80 px-3 py-3">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm font-medium">Latest Result</p>
+                <p className="mt-1 truncate text-xs text-muted-foreground">
+                  {latestArtifact
+                    ? `${latestArtifact.artifactType || 'ARTIFACT'}${latestArtifact.createdAt ? ` · ${formatProjectDate(latestArtifact.createdAt)}` : ''}`
+                    : latestFile
+                      ? 'Project file'
+                      : 'No result yet'}
+                </p>
+              </div>
+              {latestArtifact ? <Badge variant="outline">{latestArtifact.artifactType}</Badge> : null}
+            </div>
+
+            {latestArtifact || latestFile ? (
+              <div className="space-y-3">
+                {latestArtifact ? (
+                  <div className="space-y-2">
+                    <p className="line-clamp-2 text-sm font-medium">{latestArtifact.title || latestArtifact.artifactType}</p>
+                    {latestArtifactWorkItem ? (
+                      <p className="truncate text-xs text-muted-foreground">From: {latestArtifactWorkItem.title}</p>
+                    ) : null}
+                    {latestArtifact.content ? (
+                      <p className="line-clamp-3 text-sm leading-6 text-muted-foreground">{latestArtifact.content}</p>
+                    ) : null}
+                  </div>
+                ) : null}
+                {latestFile ? (
+                  <div className="rounded-md border bg-muted/10 px-3 py-2">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <FileText className="h-4 w-4 shrink-0 text-primary" />
+                      <span className="truncate text-sm font-medium">{latestFile.path}</span>
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {latestFile.size ? formatBytes(latestFile.size) : 'Project file'}
+                      {latestFile.lastModified ? ` · ${formatProjectDate(latestFile.lastModified)}` : ''}
+                    </p>
+                  </div>
+                ) : null}
+                <div className="flex flex-wrap gap-2">
+                  {latestFile ? (
+                    <>
+                      <Button type="button" size="sm" onClick={() => handleOpenWorkItemProjectFilePreview(latestFile)}>
+                        <FileSearch className="mr-2 h-4 w-4" />
+                        Preview
+                      </Button>
+                      <Button type="button" size="sm" variant="outline" onClick={() => handleOpenProjectFileInResources(latestFile)}>
+                        <FolderOpen className="mr-2 h-4 w-4" />
+                        Resources
+                      </Button>
+                      <Button type="button" size="sm" variant="outline" onClick={() => handleDownloadProjectFile(latestFile.path)}>
+                        <Download className="mr-2 h-4 w-4" />
+                        Download
+                      </Button>
+                    </>
+                  ) : null}
+                  {latestArtifact ? (
+                    <Button type="button" size="sm" variant="secondary" onClick={() => handleReviewArtifactFromHome(latestArtifact)}>
+                      <ClipboardCheck className="mr-2 h-4 w-4" />
+                      Review
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-md border border-dashed px-3 py-4 text-sm text-muted-foreground">
+                Agents have not attached a result to this goal yet.
+              </div>
+            )}
+          </div>
+
+          <div className="rounded-md border bg-background/80 px-3 py-3">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <p className="text-sm font-medium">Key Files</p>
+              <Badge variant="outline">{deliveryFiles.length}</Badge>
+            </div>
+            {visibleFiles.length ? (
+              <div className="space-y-2">
+                {visibleFiles.map((file) => (
+                  <div key={file.path} className="flex min-w-0 items-center justify-between gap-2 rounded-md border bg-muted/10 px-3 py-2">
+                    <button
+                      type="button"
+                      className="min-w-0 flex-1 truncate text-left text-sm font-medium hover:text-primary"
+                      onClick={() => handleOpenProjectFileInResources(file)}
+                    >
+                      {file.path}
+                    </button>
+                    <Button type="button" size="icon" variant="ghost" className="h-8 w-8 shrink-0" onClick={() => handleOpenWorkItemProjectFilePreview(file)}>
+                      <FileSearch className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ))}
+                {deliveryFiles.length > visibleFiles.length ? (
+                  <Button type="button" size="sm" variant="ghost" className="px-1" onClick={() => handleOpenGoalWorkItems(goal.id)}>
+                    +{deliveryFiles.length - visibleFiles.length} more files in linked items
+                  </Button>
+                ) : null}
+              </div>
+            ) : (
+              <div className="rounded-md border border-dashed px-3 py-4 text-sm text-muted-foreground">
+                No goal-scoped files are linked yet.
+              </div>
+            )}
+
+            {attentionCount || reviewItems.length ? (
+              <div className="mt-3 flex flex-wrap gap-2 border-t pt-3">
+                {ownerItems.length ? <Badge variant="warning">{ownerItems.length} owner inputs</Badge> : null}
+                {needsRevisionItems.length ? <Badge variant="destructive">{needsRevisionItems.length} rework</Badge> : null}
+                {reviewItems.length ? <Badge variant="warning">{reviewItems.length} in review</Badge> : null}
+              </div>
+            ) : (
+              <div className="mt-3 border-t pt-3 text-xs text-muted-foreground">
+                {items.length ? 'No urgent blockers surfaced for this goal.' : 'Create work items to start producing results.'}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const renderGoalProgressCard = (
     summary: (typeof homeGoalSummaries)[number],
     options: { compact?: boolean } = {},
   ) => {
-    const { goal, items, statusCounts, acceptedCount, activeCount, outputFiles, progress } = summary;
+    const { goal, items, statusCounts, acceptedCount, activeCount, outputFiles, artifactCount, progress } = summary;
     const goalGlobals = goalGlobalsByGoalId.get(goal.id) || [];
     const orderedStatuses = Object.entries(statusCounts)
       .filter(([, count]) => count > 0)
@@ -8167,6 +8569,7 @@ export function ProjectDetail() {
                 {goal.status}
               </Badge>
               <Badge variant="outline">{acceptedCount}/{items.length} accepted</Badge>
+              <Badge variant="outline">{artifactCount} artifacts</Badge>
               {activeCount ? <Badge variant="warning">{activeCount} active</Badge> : null}
               {goalGlobals.length ? <Badge variant="secondary">{goalGlobals.length} vars</Badge> : null}
             </div>
@@ -8203,6 +8606,7 @@ export function ProjectDetail() {
               <div className="space-y-2">
                 {visibleItems.map((item) => {
                   const outputCount = workItemOutputProjectFilePaths(item).length;
+                  const artifactCount = workItemArtifactCount(item);
                   return (
                     <button
                       key={item.id}
@@ -8217,7 +8621,8 @@ export function ProjectDetail() {
                       <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
                         <span>{item.workType}</span>
                         <span>{item._count?.assignments || item.assignments?.length || 0} assignments</span>
-                        <span>{outputCount} outputs</span>
+                        <span>{artifactCount} artifacts</span>
+                        <span>{outputCount} shared files</span>
                       </div>
                     </button>
                   );
@@ -8243,7 +8648,7 @@ export function ProjectDetail() {
 
           <div className="space-y-3">
             <div className="flex items-center justify-between gap-3">
-              <p className="text-sm font-medium">Outputs</p>
+              <p className="text-sm font-medium">Shared Files</p>
               <Badge variant="outline">{outputFiles.length}</Badge>
             </div>
             {outputFiles.length ? (
@@ -8542,13 +8947,35 @@ export function ProjectDetail() {
                   </div>
                 </div>
               </div>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-6">
-            <form
-              onSubmit={handleUpdateProjectSettings}
-              className="rounded-lg border bg-muted/10 p-4"
-            >
+	            </div>
+	          </CardHeader>
+	          <CardContent className="space-y-6">
+	            <div className="rounded-lg border bg-muted/10 p-4">
+	              <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+	                <div className="space-y-1">
+	                  <div className="flex items-center gap-2">
+	                    <Sparkles className="h-4 w-4 text-primary" />
+	                    <h2 className="font-semibold">Goal Outcomes</h2>
+	                  </div>
+	                  <p className="text-sm text-muted-foreground">
+	                    Latest results, files, and review actions stay grouped under the goal that produced them.
+	                  </p>
+	                </div>
+	                <Badge variant="outline">{homeGoalSummaries.length} goals</Badge>
+	              </div>
+	              <div className="space-y-4">
+	                {homeGoalSummaries.length ? (
+	                  homeGoalSummaries.map((summary) => renderGoalOutcomeCard(summary))
+	                ) : (
+	                  <p className="rounded-md border border-dashed px-3 py-4 text-sm text-muted-foreground">No goals yet.</p>
+	                )}
+	              </div>
+	            </div>
+
+	            <form
+	              onSubmit={handleUpdateProjectSettings}
+	              className="rounded-lg border bg-muted/10 p-4"
+	            >
               <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
                 <div className="space-y-1">
                   <div className="flex items-center gap-2">
@@ -8823,14 +9250,14 @@ export function ProjectDetail() {
               </form>
             ) : null}
 
-            <div className="rounded-lg border bg-muted/10 p-4">
-              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <Sparkles className="h-4 w-4 text-primary" />
-                  <h2 className="font-semibold">Goal Progress</h2>
-                </div>
-                <Badge variant="outline">{projectAllWorkItemTotal} work items</Badge>
-              </div>
+	            <div className="rounded-lg border bg-muted/10 p-4">
+	              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+	                <div className="flex items-center gap-2">
+	                  <Sparkles className="h-4 w-4 text-primary" />
+	                  <h2 className="font-semibold">Work Breakdown</h2>
+	                </div>
+	                <Badge variant="outline">{projectAllWorkItemTotal} work items</Badge>
+	              </div>
               <div className="space-y-4">
                 {homeGoalSummaries.length ? (
                   homeGoalSummaries.map((summary) => renderGoalProgressCard(summary))
@@ -9041,7 +9468,42 @@ export function ProjectDetail() {
 
                     <div className="space-y-2">
                       <div className="flex items-center justify-between gap-3">
-                        <p className="text-sm font-medium">Outputs</p>
+                        <p className="text-sm font-medium">Artifacts</p>
+                        <Badge variant="outline">{homeRecentArtifacts.length}</Badge>
+                      </div>
+                      {homeRecentArtifacts.length ? (
+                        <div className="space-y-2">
+                          {homeRecentArtifacts.map((artifact: any) => (
+                            <button
+                              key={artifact.id}
+                              type="button"
+                              className="w-full rounded-md border bg-background px-3 py-2 text-left transition-colors hover:border-primary/50"
+                              onClick={() => openProjectSection('delivery')}
+                            >
+                              <div className="flex min-w-0 items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <p className="truncate text-sm font-medium">{artifact.title || artifact.artifactType}</p>
+                                  <p className="mt-1 truncate text-xs text-muted-foreground">
+                                    {artifact.workItem?.title ||
+                                      workItems.find((item) => item.id === artifact.workItemId)?.title ||
+                                      'Project-level artifact'}
+                                  </p>
+                                </div>
+                                <Badge variant="outline" className="shrink-0">{artifact.artifactType}</Badge>
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="rounded-md border bg-background px-3 py-3 text-sm text-muted-foreground">
+                          No artifacts yet.
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-sm font-medium">Shared Files</p>
                         <Badge variant="outline">{homeOutputFiles.length}</Badge>
                       </div>
                       {homeOutputFiles.length ? (
@@ -13161,7 +13623,8 @@ export function ProjectDetail() {
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <Badge variant="outline">{projectAllWorkItemTotal} work items</Badge>
-                    <Badge variant="outline">{homeOutputFiles.length} outputs</Badge>
+                    <Badge variant="outline">{artifacts.length} artifacts</Badge>
+                    <Badge variant="outline">{homeOutputFiles.length} shared files</Badge>
                   </div>
                 </div>
                 <div className="space-y-3">
@@ -15013,15 +15476,67 @@ export function ProjectDetail() {
             </CardContent>
           </Card>
 
-          <Card className={activeProjectSection === 'delivery' ? '' : 'hidden'}>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-xl">
-                <FileText className="h-5 w-5" />
-                Delivery Loop
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-6">
-              <form onSubmit={handleCreateArtifact} className="space-y-4 border-b pb-6">
+	          <Card className={activeProjectSection === 'delivery' ? '' : 'hidden'}>
+	            <CardHeader>
+	              <CardTitle className="flex items-center gap-2 text-xl">
+	                <FileText className="h-5 w-5" />
+	                Delivery Actions
+	              </CardTitle>
+	            </CardHeader>
+	            <CardContent className="space-y-6">
+	              {latestDeliveryArtifact ? (
+	                <div className="rounded-lg border bg-muted/10 px-4 py-3">
+	                  <div className="flex flex-wrap items-start justify-between gap-3">
+	                    <div className="min-w-0 space-y-1">
+	                      <div className="flex flex-wrap items-center gap-2">
+	                        <Badge variant="secondary">Latest Delivery</Badge>
+	                        <Badge variant="outline">{latestDeliveryArtifact.artifactType}</Badge>
+	                      </div>
+	                      <p className="line-clamp-2 font-medium">{latestDeliveryArtifact.title || latestDeliveryArtifact.artifactType}</p>
+	                      <p className="text-xs text-muted-foreground">
+	                        {latestDeliveryArtifact.createdAt ? formatProjectDate(latestDeliveryArtifact.createdAt) : 'Recent artifact'}
+	                      </p>
+	                    </div>
+	                    <Button type="button" size="sm" variant="secondary" onClick={() => handleReviewArtifactFromHome(latestDeliveryArtifact)}>
+	                      <ClipboardCheck className="mr-2 h-4 w-4" />
+	                      Review
+	                    </Button>
+	                  </div>
+	                  {latestDeliveryArtifact.content ? (
+	                    <div className="mt-3 max-h-56 overflow-auto rounded-md bg-background/80 px-3 py-2 text-muted-foreground">
+	                      <MathMarkdown content={latestDeliveryArtifact.content} className="max-w-none text-sm" />
+	                    </div>
+	                  ) : null}
+                  {artifactResources(latestDeliveryArtifact).length ? (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {artifactResources(latestDeliveryArtifact).slice(0, 3).map((resource) => (
+                        <Button
+                          key={resource.key || resource.path}
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="max-w-full min-w-0 justify-start"
+                          onClick={() => handleOpenProjectFileInResources(resource)}
+                        >
+                          <FileSearch className="mr-2 h-4 w-4 shrink-0" />
+                          <span className="truncate">{resource.path}</span>
+                        </Button>
+                      ))}
+                    </div>
+                  ) : null}
+	                </div>
+	              ) : (
+	                <div className="rounded-lg border border-dashed px-4 py-5 text-sm text-muted-foreground">
+	                  No delivery artifact has been submitted yet.
+	                </div>
+	              )}
+
+	              <details className="rounded-lg border bg-background">
+	                <summary className="cursor-pointer px-4 py-3 text-sm font-medium">
+	                  Create or record delivery
+	                </summary>
+	                <div className="space-y-6 border-t px-4 py-4">
+	              <form onSubmit={handleCreateArtifact} className="space-y-4 border-b pb-6">
                 <div className="space-y-1">
                   <h3 className="font-medium">Add Artifact</h3>
                   <p className="text-sm text-muted-foreground">
@@ -15228,12 +15743,14 @@ export function ProjectDetail() {
                     onChange={(e) => setReviewForm((prev) => ({ ...prev, reviewNote: e.target.value }))}
                   />
                 </div>
-                <Button type="submit" variant="secondary" className="w-full" disabled={savingReview}>
-                  {savingReview ? 'Saving...' : 'Submit Review'}
-                </Button>
-              </form>
-            </CardContent>
-          </Card>
+	                <Button type="submit" variant="secondary" className="w-full" disabled={savingReview}>
+	                  {savingReview ? 'Saving...' : 'Submit Review'}
+	                </Button>
+	              </form>
+	                </div>
+	              </details>
+	            </CardContent>
+	          </Card>
             </>
           ) : null}
         </div>
@@ -15448,9 +15965,11 @@ export function ProjectDetail() {
                         Work Item: {workItems.find((item) => item.id === artifact.workItemId)?.title || 'Linked work item'}
                       </p>
                     )}
-                    {artifact.content && (
-                      <p className="text-sm leading-6 text-muted-foreground">{artifact.content}</p>
-                    )}
+	                    {artifact.content && (
+	                      <div className="rounded-md bg-muted/10 px-3 py-2 text-muted-foreground">
+	                        <MathMarkdown content={artifact.content} className="max-w-none text-sm" />
+	                      </div>
+	                    )}
 	                    {artifact.url && (
 	                      <a
 	                        href={artifact.url}
@@ -15468,13 +15987,10 @@ export function ProjectDetail() {
 	                          {resources.map((resource) => (
 	                            <button
 	                              type="button"
-	                              key={resource.key || resource.path}
-	                              className="flex items-center justify-between gap-3 rounded-md border px-3 py-2 text-left text-sm hover:bg-muted/40"
-	                              onClick={() => {
-	                                setActiveProjectSection('documents');
-	                                handleSelectProjectFile(resource);
-	                              }}
-	                            >
+		                              key={resource.key || resource.path}
+		                              className="flex items-center justify-between gap-3 rounded-md border px-3 py-2 text-left text-sm hover:bg-muted/40"
+		                              onClick={() => handleOpenProjectFileInResources(resource)}
+		                            >
 	                              <span className="min-w-0 truncate">{resource.path}</span>
 	                              {resource.size ? (
 	                                <span className="shrink-0 text-xs text-muted-foreground">{formatBytes(resource.size)}</span>
@@ -15858,11 +16374,189 @@ export function ProjectDetail() {
             </CardContent>
           </Card>
         </div>
-      </div>
-        </div>
-      </div>
-      {goalGlobalsModalGoal ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 px-4 py-6 backdrop-blur-sm">
+	      </div>
+	        </div>
+	      </div>
+	      <div
+	        className="group fixed bottom-5 left-4 right-4 z-40 sm:left-auto sm:right-6"
+	        onMouseEnter={handleOpenLeaderChat}
+	        onFocus={handleOpenLeaderChat}
+	      >
+	        <div
+	          className={`mb-3 ml-auto w-full max-w-[440px] rounded-lg border bg-background shadow-2xl transition-all duration-150 ${
+	            leaderChatPinned
+	              ? 'pointer-events-auto translate-y-0 opacity-100'
+	              : 'pointer-events-none translate-y-2 opacity-0 group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:translate-y-0 group-focus-within:opacity-100'
+	          }`}
+	        >
+	          <div className="flex items-start justify-between gap-3 border-b px-4 py-3">
+	            <div className="min-w-0 space-y-1">
+	              <div className="flex flex-wrap items-center gap-2">
+	                <Crown className="h-4 w-4 text-primary" />
+	                <p className="truncate text-sm font-semibold">
+	                  {leaderAgentMember ? formatAgentDisplayName(leaderAgentMember) : 'Leader Agent'}
+	                </p>
+	                {leaderAgentRuntime ? (
+	                  <Badge variant={AGENT_RUNTIME_STATUS_VARIANT[leaderAgentRuntime.session.status] || 'secondary'}>
+	                    {formatRuntimeStatusLabel(leaderAgentRuntime.session.status)}
+	                  </Badge>
+	                ) : (
+	                  <Badge variant="secondary">not launched</Badge>
+	                )}
+	                {leaderAgentMember ? <Badge variant="outline">{formatRoleLabel(leaderAgentMember.role)}</Badge> : null}
+	              </div>
+	              <p className="line-clamp-2 text-xs text-muted-foreground">
+	                {leaderAgentRuntime
+	                  ? leaderAgentIsSelected
+	                    ? selectedAgentActivity
+	                    : leaderAgentRuntime.session.currentActivity || 'Hover to open the leader conversation.'
+	                  : leaderAgentMember
+	                    ? 'Start or reconnect the lead runtime before chatting.'
+	                    : 'Create a lead agent to coordinate this project.'}
+	              </p>
+	            </div>
+	            <Button
+	              type="button"
+	              size="icon"
+	              variant="ghost"
+	              className="h-8 w-8 shrink-0"
+	              aria-label={leaderChatPinned ? 'Unpin leader chat' : 'Pin leader chat'}
+	              onClick={() => {
+	                handleOpenLeaderChat();
+	                setLeaderChatPinned((current) => !current);
+	              }}
+	            >
+	              {leaderChatPinned ? <X className="h-4 w-4" /> : <MessageSquare className="h-4 w-4" />}
+	            </Button>
+	          </div>
+
+	          {leaderAgentRuntime && leaderAgentIsSelected ? (
+	            <div className="space-y-3 px-4 py-3">
+	              <div className="max-h-72 space-y-2 overflow-y-auto rounded-md border bg-muted/10 p-2" data-agent-message-list="true">
+	                {selectedAgentMessages.length ? (
+	                  selectedAgentMessages.slice(-4).map((message) => {
+	                    if (message.role === 'tool') {
+	                      return <div key={message.id}>{renderAgentActivity(message.actions || [], `leader-${message.id}`)}</div>;
+	                    }
+	                    return renderAgentMessage(message, { compact: true });
+	                  })
+	                ) : (
+	                  <p className="px-2 py-6 text-center text-sm text-muted-foreground">No leader messages yet.</p>
+	                )}
+	                {selectedAgentIsTyping ? (
+	                  <div className="flex justify-start">
+	                    <div className="rounded-md bg-muted/40 px-3 py-2">
+	                      {selectedAgentTypingLines.length > 0 ? (
+	                        <div className="mb-2 space-y-1 text-xs leading-5 text-muted-foreground">
+	                          {selectedAgentTypingLines.map((line) => (
+	                            <div key={line}>{line}</div>
+	                          ))}
+	                        </div>
+	                      ) : null}
+	                      <div className="flex items-center gap-1.5">
+	                        <span className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground/70" />
+	                        <span className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground/70 [animation-delay:120ms]" />
+	                        <span className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground/70 [animation-delay:240ms]" />
+	                      </div>
+	                    </div>
+	                  </div>
+	                ) : null}
+	              </div>
+	              {!selectedAgentCanMessage ? (
+	                <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-100">
+	                  <span className="min-w-0 flex-1">
+	                    {leaderAgentCanReconnect
+	                      ? 'Leader runtime is offline. Reconnect it before sending a message.'
+	                      : selectedAgentMessagePlaceholder}
+	                  </span>
+	                  <div className="flex shrink-0 gap-2">
+	                    {leaderAgentCanReconnect ? (
+	                      <Button type="button" size="sm" variant="outline" onClick={() => handleReconnectAgentRuntime(leaderAgentRuntime)}>
+	                        <RefreshCw className="mr-2 h-4 w-4" />
+	                        Reconnect
+	                      </Button>
+	                    ) : null}
+	                    <Button type="button" size="sm" variant="ghost" onClick={() => openProjectSection('members')}>
+	                      Members
+	                    </Button>
+	                  </div>
+	                </div>
+	              ) : null}
+	              <form onSubmit={handleSendAgentMessage} className="space-y-2">
+	                <textarea
+	                  className="min-h-[72px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+	                  value={agentMessage}
+	                  onFocus={() => updateProjectFileMentionState('agentMessage', agentMessage)}
+	                  onBlur={() => closeProjectFileMentionMenu('agentMessage')}
+	                  onChange={(event) => handleAgentMessageChange(event.target.value)}
+	                  onCompositionStart={handleAgentMessageCompositionStart}
+	                  onCompositionEnd={handleAgentMessageCompositionEnd}
+	                  onKeyDown={handleAgentMessageKeyDown}
+	                  placeholder={selectedAgentMessagePlaceholder}
+	                  disabled={!selectedAgentCanMessage}
+	                />
+	                <div className="flex flex-wrap items-center justify-between gap-2">
+	                  <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+	                    {agentMessageResponse || 'Ask the lead agent about project state, blockers, or next steps.'}
+	                  </p>
+	                  <Button type="submit" size="sm" variant="secondary" disabled={sendingAgentMessage || !agentMessage.trim() || !selectedAgentCanMessage}>
+	                    <Send className="mr-2 h-4 w-4" />
+	                    {sendingAgentMessage ? 'Sending...' : 'Send'}
+	                  </Button>
+	                </div>
+	              </form>
+	            </div>
+	          ) : (
+	            <div className="space-y-3 px-4 py-4">
+	              <p className="text-sm leading-6 text-muted-foreground">
+	                {leaderAgentMember
+	                  ? leaderAgentRuntime
+	                    ? 'Open the leader runtime to inspect and message it.'
+	                    : 'The lead agent exists, but no runtime is available yet.'
+	                  : 'This project does not have a lead agent member yet.'}
+	              </p>
+	              <div className="flex flex-wrap gap-2">
+	                {leaderAgentRuntime && leaderAgentCanReconnect ? (
+	                  <Button type="button" size="sm" variant="secondary" onClick={() => handleReconnectAgentRuntime(leaderAgentRuntime)}>
+	                    <RefreshCw className="mr-2 h-4 w-4" />
+	                    Reconnect
+	                  </Button>
+	                ) : null}
+	                {leaderAgentMember && !leaderAgentRuntime ? (
+	                  <Button
+	                    type="button"
+	                    size="sm"
+	                    variant="secondary"
+	                    onClick={() => handleOpenLaunchAgentRuntime(leaderAgentMember.role, leaderAgentMember.id, 'local-codex')}
+	                  >
+	                    <Rocket className="mr-2 h-4 w-4" />
+	                    Start Lead
+	                  </Button>
+	                ) : null}
+	                <Button type="button" size="sm" variant="outline" onClick={() => openProjectSection('members')}>
+	                  <UserRoundCheck className="mr-2 h-4 w-4" />
+	                  Members
+	                </Button>
+	              </div>
+	            </div>
+	          )}
+	        </div>
+	        <button
+	          type="button"
+	          className={`ml-auto flex h-14 w-14 items-center justify-center rounded-full border bg-primary text-primary-foreground shadow-xl transition-transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 ${
+	            leaderAgentRuntime?.session.status === 'TYPING' ? 'animate-pulse' : ''
+	          }`}
+	          aria-label="Open leader agent chat"
+	          onClick={() => {
+	            handleOpenLeaderChat();
+	            setLeaderChatPinned((current) => !current);
+	          }}
+	        >
+	          <Crown className="h-6 w-6" />
+	        </button>
+	      </div>
+	      {goalGlobalsModalGoal ? (
+	        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 px-4 py-6 backdrop-blur-sm">
           <div className="max-h-[90vh] w-full max-w-4xl overflow-y-auto rounded-lg border bg-background shadow-lg">
             <div className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b bg-background px-5 py-4">
               <div>
